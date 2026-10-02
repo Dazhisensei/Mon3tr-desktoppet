@@ -94,7 +94,7 @@ const BIRTHDAY_KEY = 'pet.birthdayPlayedOn';
  */
 export async function initVoice() {
   try {
-    const res = await fetch('./audio/audio.json');
+    const res = await fetch(`${audioBase}audio/audio.json`);
     if (res.ok) manifest = await res.json();
   } catch {
     /* 用内置表兜底 */
@@ -130,12 +130,26 @@ export function clipNames() {
   return FALLBACK_CLIPS.slice();
 }
 
-/** 语音名 -> 相对 web 根目录的路径。 */
+/**
+ * 音频根路径，由 main.js 在启动时按素材实际位置注入。
+ *
+ * 语音原本内嵌在 exe 里（`./audio/` 相对路径直接读得到）；
+ * 现在素材外置到 exe 同目录，需要换成 asset 协议前缀。
+ * 默认空串 = 开发时直接读 `web/audio/`。
+ */
+let audioBase = '';
+
+/** 由 main.js 调用，告知语音素材的实际位置。 */
+export function setAudioBase(base) {
+  audioBase = base || '';
+}
+
+/** 语音名 -> 可播放路径。 */
 export function clipPath(name) {
   const entry = manifest?.languages?.[lang]?.items?.[name];
-  if (entry?.file) return './audio/' + entry.file;
+  if (entry?.file) return audioBase + 'audio/' + entry.file;
   // 清单缺失时按约定拼路径
-  return `./audio/${lang}/${name}.ogg`;
+  return `${audioBase}audio/${lang}/${name}.ogg`;
 }
 
 /**

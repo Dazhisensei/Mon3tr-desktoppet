@@ -3,13 +3,16 @@
 desktop-pet/src-tauri/target/
 # Tauri 打包产物
 desktop-pet/src-tauri/gen/
-# 分发包
+# 分发包（含转换后的 WebP 素材，可由 _work/build_release.ps1 重新生成）
 dist/
+
+# web-dist：由 _work/build_release.ps1 从 web/ 复制代码生成
+desktop-pet/web-dist/
 
 # ---------- 本地工具链 ----------
 # 本项目把 Rust 装在 _work/rust/（非默认路径，约 2.6 GB）
 _work/rust/
-# NSIS 工具链
+# NSIS 工具链（若曾构建过安装程序会留下，约 7 MB）
 _work/nsis/
 
 # ---------- 运行时生成 ----------
@@ -19,6 +22,9 @@ webview-data/
 pet-config.json
 # 运行日志
 pet.log
+# 发布目录里的运行时文件
+Mon3trPet/pet.log
+Mon3trPet/webview-data/
 
 # ---------- 临时文件 ----------
 # 配置写入用的临时文件（save_config 先写 .tmp 再改名）

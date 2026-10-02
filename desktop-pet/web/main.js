@@ -23,6 +23,7 @@ import {
   playRandomTalk,
   playStartupClip,
   WEATHER_CLIPS,
+  setAudioBase,
 } from './voice.js';
 import { getWeather, formatWeatherReport, searchCity, MAX_CITIES } from './weather.js';
 import { initBubble, showBubble, hideBubble, showPending, isBubbleVisible } from './bubble.js';
@@ -78,10 +79,71 @@ let birthdayCfg = null;
 
 /* ---------- 资源载入 ---------- */
 
+/**
+ * 资源根路径。
+ *
+ * ## 为什么要可变
+ *
+ * 素材（342 帧 PNG、38 条语音）原本**内嵌在 exe 里**，导致 exe 有 73 MB
+ * —— 而程序本体只有 2 MB，97% 都是素材。
+ *
+ * 现在改为**外置**：素材放在 exe 同目录的 `assets/`、`audio/` 下，
+ * exe 里只保留代码。启动时由 Rust 侧探测素材位置，把可用的基址
+ * 通过 `get_asset_base` 告诉前端。
+ *
+ * ## 两种取值
+ *
+ *   - `''`（默认）：走 WebView 的相对路径，适用于**开发时**
+ *     （素材仍在 `web/` 下，`npm run dev` 式的直接调试）
+ *   - `'http://petasset.localhost/'`：走 Rust 注册的 petasset 协议
+ *     读取 **exe 同目录**的外部文件，适用于打包后
+ *
+ * 前端不关心素材到底在哪，只认这个前缀。
+ *
+ * 语音的基址由 voice.js 自己持有（`setAudioBase`），这里不重复声明，
+ * 避免两个模块出现同名变量。
+ */
+let assetBase = '';
+
 async function loadManifest() {
-  const res = await fetch('./assets/actions.json');
+  const res = await fetch(`${assetBase}assets/actions.json`);
   if (!res.ok) throw new Error('无法读取 actions.json');
   return res.json();
+}
+
+/**
+ * 确定素材位置（内嵌 or 外置）。
+ *
+ * ## 为什么要探测而不是写死
+ *
+ * 素材有两种存在方式，必须都支持：
+ *
+ *   1. **外置**（发布版）：exe 同目录下有 `assets/`、`audio/`，
+ *      这是默认形态 —— exe 因此只有几 MB 而不是 73 MB。
+ *   2. **内嵌**（开发版）：素材仍在 `web/` 下，直接相对路径即可。
+ *      `cargo tauri dev` 与浏览器打开 `preview.html` 都靠这条。
+ *
+ * Rust 侧的 `get_asset_base` 会返回可用的前缀：
+ *   - 找到外部素材 -> `http://petasset.localhost/`
+ *   - 没找到       -> 空串（回落到相对路径）
+ *
+ * 探测失败**不能致命**：宁可退回相对路径，也不要因为一个命令
+ * 失败就整个启动不起来。
+ */
+async function resolveAssetBase() {
+  try {
+    const base = await invoke('get_asset_base');
+    if (typeof base === 'string' && base) {
+      assetBase = base;
+      setAudioBase(base);
+    }
+  } catch {
+    /* 保持空串，走相对路径 */
+  }
+  // 没探测到外部素材时也要显式告知 voice.js 走相对路径，
+  // 否则它会保留上一次的值（本进程内不会变，但语义上应显式）。
+  setAudioBase(assetBase);
+  window.__assetBase = assetBase;
 }
 
 const frameCache = new Map();
@@ -93,12 +155,13 @@ async function loadFrames(actionKey) {
   const act = state.manifest.actions[actionKey];
   if (!act) throw new Error('未知动作: ' + actionKey);
 
-  const base = `./assets/${act.dir}/`;
+  const base = `${assetBase}assets/${act.dir}/`;
+  const ext = act.ext || 'png';
   const imgs = [];
   for (let i = 1; i <= act.frameCount; i++) {
     const n = String(i).padStart(4, '0');
     const img = new Image();
-    img.src = base + `f${n}.png`;
+    img.src = `${base}f${n}.${ext}`;
     try {
       await img.decode();
     } catch {
@@ -1186,6 +1249,10 @@ async function listenSettingChanges() {
 
 (async function boot() {
   try {
+    // 先把素材基址定下来，再读清单 —— 顺序不能反，
+    // 否则 manifest 会去错误的位置找。
+    await resolveAssetBase();
+
     state.manifest = await loadManifest();
     window.__manifest = state.manifest;
 

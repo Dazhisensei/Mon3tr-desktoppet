@@ -1,5 +1,5 @@
 // 回归测试：加载真实 main.js / brain.js，覆盖 DOM 菜单、菜单暂停移动、设置同步、点击穿透。
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = 'E:/work/deskpet/M3';
@@ -790,18 +790,33 @@ if (capOk) {
 }
 
 // 生成产物也检查一遍：空的 {} 就是故障状态
-const outCap = path.join(ROOT,'desktop-pet','src-tauri','target','debug','build');
+//
+// 构建目录名因 profile 而异（debug / release）。早期只查 debug，
+// 一旦只编译过 release（或 debug 产物被清理），断言就会误报「未找到」
+// —— 那是**测试的盲区**，不是真的故障。
+const capRoots = [
+  path.join(ROOT,'desktop-pet','src-tauri','target','debug','build'),
+  path.join(ROOT,'desktop-pet','src-tauri','target','release','build'),
+];
 let genCap = null;
-try {
-  const dirs = readdirSync(outCap).filter(d=>d.startsWith('desktop-pet-'));
-  for (const d of dirs) {
-    const p = path.join(outCap, d, 'out', 'capabilities.json');
-    if (existsSync(p)) { genCap = JSON.parse(readFileSync(p,'utf8')); break; }
-  }
-} catch { /* ignore */ }
+let genCapFrom = '';
+for (const outCap of capRoots) {
+  try {
+    const dirs = readdirSync(outCap).filter(d=>d.startsWith('desktop-pet-'));
+    for (const d of dirs) {
+      const p = path.join(outCap, d, 'out', 'capabilities.json');
+      if (existsSync(p)) {
+        genCap = JSON.parse(readFileSync(p,'utf8'));
+        genCapFrom = path.basename(path.dirname(outCap));
+        break;
+      }
+    }
+  } catch { /* 该 profile 未编译过，跳过 */ }
+  if (genCap) break;
+}
 chk('构建产物 capabilities 非空（曾为空 {} 导致全部 IPC 被拒）',
     genCap !== null && Object.keys(genCap).length > 0,
-    genCap ? `keys=${Object.keys(genCap).join(',')}` : '未找到');
+    genCap ? `${genCapFrom}: keys=${Object.keys(genCap).join(',')}` : '未找到');
 
 /* ---------- 10. 天气 ---------- */
 console.log('\n=== 10. 天气 ===');
@@ -1671,6 +1686,60 @@ console.log('\n=== 21. 气泡布局 ===');
       /syncScaleFromWindow\(\)[\s\S]{0,80}fitStage\(\)[\s\S]{0,80}refreshScreen/.test(src));
   chk('Rust 在 exit_settings_ui 补发 settings:scale',
       /app\.emit\("settings:scale", s\)/.test(rs));
+}
+
+/* ---------- 22. 素材外置（exe 瘦身） ---------- */
+console.log('\n=== 22. 素材外置 ===');
+
+{
+  const src = readFileSync(path.join(WEB,'main.js'),'utf8');
+  const vSrc = readFileSync(path.join(WEB,'voice.js'),'utf8');
+  const rs = readFileSync(path.join(ROOT,'desktop-pet','src-tauri','src','lib.rs'),'utf8');
+  const conf = JSON.parse(readFileSync(
+    path.join(ROOT,'desktop-pet','src-tauri','tauri.conf.json'),'utf8'));
+
+  // 22.1 frontendDist 必须指向不含素材的目录
+  const fd = conf.build.frontendDist;
+  chk('frontendDist 指向 web-dist（不含素材）',
+      /web-dist/.test(fd), fd);
+  const webDist = path.join(ROOT,'desktop-pet','web-dist');
+  if (existsSync(webDist)) {
+    chk('web-dist 内无 assets/ 目录', !existsSync(path.join(webDist,'assets')));
+    chk('web-dist 内无 audio/ 目录', !existsSync(path.join(webDist,'audio')));
+    const size = readdirSync(webDist).reduce(
+      (a,f)=>a+statSync(path.join(webDist,f)).size, 0);
+    chk('web-dist 体积 < 1 MB（只有代码）', size < 1024*1024,
+        `${(size/1024).toFixed(0)} KB`);
+  } else {
+    console.log('  (跳过 web-dist 检查：尚未生成，跑 build_release.ps1 后可用)');
+  }
+
+  // 22.2 Rust 侧的素材服务
+  chk('Rust 注册 petasset 协议',
+      /register_uri_scheme_protocol\("petasset"/.test(rs));
+  chk('Rust 提供 get_asset_base 命令', /fn get_asset_base/.test(rs));
+  chk('asset 根会校验 actions.json 存在',
+      /actions\.json"\)\.is_file\(\)/.test(rs));
+  chk('asset 协议做目录穿越检查',
+      /normalize\(&full\)\.starts_with\(normalize\(&root\)\)/.test(rs));
+  // 中文语音文件名会被 percent-encode，不解码就找不到文件
+  chk('asset 协议做 percent 解码（中文文件名必需）',
+      /fn percent_decode/.test(rs) && /percent_decode\(raw\)/.test(rs));
+
+  // 22.3 前端基址
+  chk('main.js 有 assetBase 且默认空串',
+      /let assetBase = ''/.test(src));
+  chk('main.js 启动时先解析素材基址再读清单',
+      /await resolveAssetBase\(\)[\s\S]{0,200}loadManifest\(\)/.test(src));
+  chk('资源探测失败不致命（有 try/catch 回落）',
+      /await invoke\('get_asset_base'\)/.test(src));
+  chk('voice.js 有 setAudioBase 且路径拼 audioBase',
+      /export function setAudioBase/.test(vSrc) && /audioBase \+ 'audio\//.test(vSrc));
+
+  // 22.4 CSP 必须放行 petasset，否则资源被拦
+  chk('CSP 放行 petasset.localhost（img/media）',
+      (conf.app.security.csp.match(/petasset\.localhost/g)||[]).length >= 2,
+      `${(conf.app.security.csp.match(/petasset\.localhost/g)||[]).length} 处`);
 }
 
 /* ---------- 汇总 ---------- */

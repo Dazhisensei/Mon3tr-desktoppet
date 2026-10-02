@@ -746,6 +746,135 @@ fn set_scale(
     Ok(())
 }
 
+/* ---------- 素材（外置于 exe 同目录） ---------- */
+
+/// 素材根目录：exe 同目录，且其中确实有 `assets/actions.json`。
+///
+/// ## 为什么素材要外置
+///
+/// 素材 342 帧 + 38 条语音约 68 MB，而程序本体只有 2 MB。
+/// 内嵌会让 exe 达 73 MB（97% 都是素材），既臃肿又让每次
+/// 改一行代码都要重新拷 68 MB。
+///
+/// 外置后 exe 只有几 MB，素材改动也不必重新编译。
+///
+/// ## 为什么要检查 actions.json
+///
+/// 只看目录是否存在是不够的：开发时 exe 在 `target/debug/` 下，
+/// 同级并没有素材。检查一个**必定存在**的文件，可以避免把
+/// 空目录当成素材根，从而错误地返回 asset 前缀、让前端加载失败。
+fn asset_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // 打包后的正常位置：exe 同目录
+    if dir.join("assets").join("actions.json").is_file() {
+        return Some(dir.to_path_buf());
+    }
+    // 开发时的备用位置：从 target/<profile>/ 回到项目根的 desktop-pet/
+    // （便于直接跑 target/debug/desktop-pet.exe 时也能找到素材）
+    let candidates = [
+        dir.join("..").join("..").join("web"),
+        dir.join("..").join("..").join("..").join("web"),
+    ];
+    for c in candidates {
+        if c.join("assets").join("actions.json").is_file() {
+            return c.canonicalize().ok();
+        }
+    }
+    None
+}
+
+/// 供前端获取素材基址；没有外部素材时返回空串（前端回落到相对路径）。
+#[tauri::command]
+fn get_asset_base() -> String {
+    match asset_root() {
+        Some(_) => "http://petasset.localhost/".to_string(),
+        None => String::new(),
+    }
+}
+
+/// 归一化路径，用于「防目录穿越」的前缀比较。
+///
+/// 只做词法处理（不访问文件系统），把 `..` 消解掉后比较，
+/// 避免 `assets/../../secret` 这类路径逃出素材根。
+fn normalize(p: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        use std::path::Component::*;
+        match comp {
+            ParentDir => {
+                out.pop();
+            }
+            CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 对 URL 路径做 percent-decoding。
+///
+/// 语音文件名全是中文（`任命助理.ogg` 等），浏览器发出的请求里
+/// 会被编码成 `%E4%BB%BB...`。不解码就会按字面去找文件而失败。
+///
+/// 自己实现而不引入 `percent-encoding` 依赖：这里只需处理
+/// `%XX` 与 `+`，逻辑很短且没有边界情况（素材文件名不含 `+`，
+/// 因此**不把 `+` 当空格**，避免误伤）。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // 注意边界：需要 i+1 与 i+2 都存在，因此是 i + 2 < len 的
+        // 「小于等于」形式 —— 写成 i + 2 < bytes.len() 会漏掉
+        // 恰好位于字符串末尾的 %XX。
+        if bytes[i] == b'%' && i + 2 <= bytes.len() - 1 {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // 解码后可能是合法 UTF-8（中文），失败则退回有损转换
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 按扩展名给出 MIME 类型。
+///
+/// 素材只有图与音频，这里覆盖用到的几种即可；未知类型用
+/// `application/octet-stream`，浏览器会按二进制处理。
+fn mime_of(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "ogg" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 构造一个最小的 HTTP 响应（asset 协议用）。
+fn http_response(status: u16, body: Vec<u8>, mime: &str) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", mime)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(body)
+        .unwrap_or_else(|_| {
+            tauri::http::Response::new(Vec::new())
+        })
+}
+
 /* ---------- WebView2 数据目录 ---------- */
 fn data_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -800,11 +929,59 @@ pub fn run() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &merged);
     log(&format!("WEBVIEW2 args = {merged}"));
 
+    // 素材外置：把 exe 同目录作为素材根
+    match asset_root() {
+        Some(p) => log(&format!("asset root = {}", p.display())),
+        None => log("asset root: 未找到外部素材目录，将回落到内嵌资源"),
+    }
+
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             drag: Mutex::new(DragState::default()),
             ui_backup: Mutex::new(None),
+        })
+        // 把 exe 同目录的素材暴露给前端。
+        //
+        // ## 为什么需要
+        //
+        // 素材（342 帧图、38 条语音，约 68 MB）原本内嵌在 exe 里，
+        // 使 exe 有 73 MB —— 而程序本体只有 2 MB，97% 都是素材。
+        //
+        // 改为外置后，前端需要一种方式读取 exe **同目录**的文件。
+        // Tauri 的 asset 协议正是干这个的：注册一个自定义协议，
+        // 把某个目录映射成 `http://<scheme>.localhost/` 下的 URL。
+        //
+        // 用 `register_uri_scheme_protocol` 而不是 `asset_protocol` 插件，
+        // 是为了少一个依赖，且作用范围更明确（只暴露素材目录）。
+        .register_uri_scheme_protocol("petasset", |_app, request| {
+            let raw = request.uri().path().trim_start_matches('/');
+            // URL 里的中文名是 percent-encoded（如
+            // `audio/zh/%E4%BB%BB%E5%91%BD%E5%8A%A9%E7%90%86.ogg`），
+            // 直接当文件路径用会找不到文件 —— 语音文件名全是中文，
+            // 这个问题必然触发。必须先解码。
+            let path = percent_decode(raw);
+            let path = path.as_str();
+            let Some(root) = asset_root() else {
+                return http_response(404, b"asset root not found".to_vec(), "text/plain");
+            };
+            // 防目录穿越：拼接后必须仍在 root 内
+            let full = root.join(path);
+            let ok = normalize(&full).starts_with(normalize(&root));
+            if !ok {
+                log(&format!("asset: 拒绝越界访问 {path}"));
+                return http_response(403, b"forbidden".to_vec(), "text/plain");
+            }
+            match std::fs::read(&full) {
+                Ok(bytes) => {
+                    let mime = mime_of(path);
+                    http_response(200, bytes, mime)
+                }
+                Err(e) => {
+                    log(&format!("asset: 读取失败 {path}: {e}"));
+                    http_response(404, b"not found".to_vec(), "text/plain")
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_window_pos,
@@ -826,6 +1003,7 @@ pub fn run() {
             preview_voice,
             set_weather_cities,
             get_weather_cities,
+            get_asset_base,
             enter_settings_ui,
             exit_settings_ui,
             move_pet_to_bottom,

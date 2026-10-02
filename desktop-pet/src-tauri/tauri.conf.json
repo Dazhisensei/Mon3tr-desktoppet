@@ -4,13 +4,13 @@
   "version": "0.1.0",
   "identifier": "com.dazhisensei.mon3trpet",
   "build": {
-    "frontendDist": "../web"
+    "frontendDist": "../web-dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; img-src 'self' data: blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost https://api.open-meteo.com https://geocoding-api.open-meteo.com"
+      "csp": "default-src 'self'; script-src 'self'; img-src 'self' data: blob: asset: http://asset.localhost http://petasset.localhost; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost http://petasset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost http://petasset.localhost https://api.open-meteo.com https://geocoding-api.open-meteo.com"
     }
   },
   "bundle": {

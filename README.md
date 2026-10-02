@@ -9,8 +9,20 @@ Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 
 ## 下载
 
-到 [Releases](../../releases) 页面下载 `Mon3trPet-x.y.z-win64.zip`，
+到 [Releases](../../releases) 页面下载 `Mon3trPet-x.y.z-win64.zip`（约 19 MB），
 **解压即用，无需安装**。
+
+解压后是这样：
+
+```
+Mon3trPet\
+├─ Mon3trPet.exe      启动器，仅 3.8 MB
+├─ assets\            角色动画（342 帧 WebP，约 14 MB）
+└─ audio\             语音（38 条 Opus，约 3.4 MB）
+```
+
+> 素材是**独立文件**，不是塞在 exe 里的 —— 所以 exe 只有 3.8 MB，
+> 改素材也不必重新编译。但**三者必须放在一起**，不要单独移动 exe。
 
 > **请解压到可写目录**（桌面、`D:\Tools\` 等）。
 > 程序会在 exe 同目录生成 `pet-config.json` 与 `webview-data\`，
@@ -69,11 +81,19 @@ Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 
 ## 从源码构建
 
+一条命令完成全流程（生成前端代码副本 → 转换素材 → 编译 → 打包）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File _work\build_release.ps1
+```
+
+产物在 `dist\Mon3trPet\`。
+
+若只想编译 exe（素材已就绪）：
+
 ```powershell
 cargo build --release --manifest-path desktop-pet\src-tauri\Cargo.toml
 ```
-
-产物在 `desktop-pet\src-tauri\target\release\`。
 
 构建环境、完全离线构建、目录结构、如何扩充新动作，
 见 [docs/BUILD.md](docs/BUILD.md)。
