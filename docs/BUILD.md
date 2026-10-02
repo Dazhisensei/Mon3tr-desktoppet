@@ -1,9 +1,8 @@
-# 构建与打包
+# 构建
 
-> 本文由原 README 拆出，内容未改动。
 > 返回 [项目首页](../README.md)。
 
-构建环境、离线构建、打包成安装程序、目录结构、如何扩充新动作。
+构建环境、离线构建、目录结构、如何扩充新动作。
 
 ---
 
@@ -42,7 +41,7 @@ M3/
         ├─ src/lib.rs        窗口、拖拽、配置、屏幕信息
         ├─ src/main.rs       入口
         ├─ capabilities/     ACL 权限（事件监听必需，见[踩坑记录](TROUBLESHOOTING.md) 第 15 条）
-        ├─ tauri.conf.json   窗口与打包配置
+        ├─ tauri.conf.json   窗口与前端资源位置
         └─ icons/            图标
 ```
 
@@ -149,67 +148,3 @@ vendored 模式下必需的 `.cargo-checksum.json`（registry 的解压目录里
 
 > 每拉取过新依赖后都要重跑一次 `make_checksums.py`，
 > 否则新 crate 缺校验文件会导致离线构建失败。
-
-## 打包
-
-### 产物
-
-| 文件 | 说明 |
-|---|---|
-| `dist\Mon3trPet_0.1.0_x64-setup.exe` | **NSIS 安装程序**（推荐分发）|
-| `dist\Mon3trPet-0.1.0-win64.zip` | 免安装绿色版（解压即用）|
-
-### 一条命令构建安装程序
-
-```powershell
-powershell -ExecutionPolicy Bypass -File _work\build_installer.ps1
-```
-
-脚本会自动设置 Rust 环境、检查 NSIS、离线编译、把产物复制到 `dist\`。
-
-### 关键配置：`useLocalToolsDir`
-
-`tauri.conf.json` 里设了：
-
-```json
-"bundle": { "useLocalToolsDir": true }
-```
-
-**这一项是必需的**。Tauri 默认把 NSIS 工具放在
-`%LOCALAPPDATA%\tauri\NSIS`，而该路径在受限环境下**不可写**
-（`WinError 5 拒绝访问`），会导致下载解包失败。
-
-开启后 tauri-bundler 改用 `cargo metadata` 的 **target 目录**：
-
-```
-desktop-pet\src-tauri\target\.tauri\NSIS\
-```
-
-注意**不含 profile 层级**（不是 `target\release\.tauri`）——
-放错层级会被忽略，Tauri 转而尝试联网下载。
-
-### NSIS 版本必须匹配
-
-Tauri 会校验 NSIS 的 SHA1，版本不符会重新下载（无网络则失败）。
-当前 `tauri-bundler 2.10.1` 要求：
-
-| 项 | 值 |
-|---|---|
-| NSIS | `nsis-3.11.zip` |
-| SHA1 | `EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D` |
-| 必需文件 | `makensis.exe`、`Bin/makensis.exe`、`Plugins\x86-unicode\additional\nsis_tauri_utils.dll` |
-
-`_work/fetch_nsis.py` 会按这些常量下载并**校验 SHA1**，
-放到正确位置（`upstream 代理需在 127.0.0.1:7897`）。
-
-### 布局说明：资源已内嵌
-
-`frontendDist: ../web` 会把整个前端（含 68 MB 的 PNG 序列与
-3.4 MB 语音）**打进 exe**，因此：
-
-- 绿色版**只需一个 exe**，无需附带 `web/` 目录
-- exe 体积约 74 MB，属正常
-
-程序运行时在 **exe 同目录**生成 `pet-config.json` 与 `webview-data\`，
-所以**必须放在可写位置**（不要放 `C:\Program Files\`）——
-绿色版的使用说明里已明确写出这一点。

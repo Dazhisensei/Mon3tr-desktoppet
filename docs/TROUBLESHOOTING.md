@@ -321,10 +321,7 @@ const CLICK_HOLD_MS = 420;   // 原为 80ms
 | `_work/click_test.mjs` | 单点验证菜单「行走」的行为与显示状态 |
 | `_work/verify_audio_files.mjs` | 语音清单与磁盘文件是否一一对应（12 条断言）|
 | `_work/verify_scale_fix.mjs` | **用 vm 加载真实函数**验证缩放夹取与自愈逻辑（14 项）|
-| `_work/verify_installer.py` | 校验 NSIS 安装包（PE 头、载荷内嵌、卸载器）|
 | `_work/make_checksums.py` | 为 vendored crate 补 `.cargo-checksum.json`（离线构建必需）|
-| `_work/fetch_nsis.py` | 下载 NSIS 3.11 与工具 DLL，校验 SHA1 |
-| `_work/build_installer.ps1` | 一条命令构建安装程序 |
 
 **教训**
 

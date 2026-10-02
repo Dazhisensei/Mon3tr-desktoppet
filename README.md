@@ -9,14 +9,10 @@ Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 
 ## 下载
 
-到 [Releases](../../releases) 页面下载：
+到 [Releases](../../releases) 页面下载 `Mon3trPet-x.y.z-win64.zip`，
+**解压即用，无需安装**。
 
-| 文件 | 说明 |
-|---|---|
-| `Mon3trPet_x.y.z_x64-setup.exe` | **安装程序**（推荐），含开始菜单快捷方式与卸载器 |
-| `Mon3trPet-x.y.z-win64.zip` | **免安装绿色版**，解压即用 |
-
-> **绿色版请放在可写目录**（桌面、`D:\Tools\` 等）。
+> **请解压到可写目录**（桌面、`D:\Tools\` 等）。
 > 程序会在 exe 同目录生成 `pet-config.json` 与 `webview-data\`，
 > 放在 `C:\Program Files\` 会因权限不足导致配置存不下来。
 
@@ -74,14 +70,12 @@ Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 ## 从源码构建
 
 ```powershell
-# 构建
 cargo build --release --manifest-path desktop-pet\src-tauri\Cargo.toml
-
-# 打包成安装程序
-powershell -ExecutionPolicy Bypass -File _work\build_installer.ps1
 ```
 
-构建环境、完全离线构建、NSIS 工具链准备、目录结构、如何扩充新动作，
+产物在 `desktop-pet\src-tauri\target\release\`。
+
+构建环境、完全离线构建、目录结构、如何扩充新动作，
 见 [docs/BUILD.md](docs/BUILD.md)。
 
 ## 文档
@@ -90,7 +84,7 @@ powershell -ExecutionPolicy Bypass -File _work\build_installer.ps1
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 各功能的实现方式与设计取舍 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 开发中踩过的坑与排查方法 |
-| [docs/BUILD.md](docs/BUILD.md) | 构建、打包、目录结构、扩展动作 |
+| [docs/BUILD.md](docs/BUILD.md) | 构建、目录结构、扩展动作 |
 
 ## 素材与版权
 
