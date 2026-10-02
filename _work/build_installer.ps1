@@ -70,11 +70,19 @@ try {
 
 Write-Host '=== 4/4 复制产物到 dist ===' -ForegroundColor Cyan
 New-Item -ItemType Directory -Path $DIST -Force | Out-Null
-$setup = Join-Path $TAURI_DIR 'src-tauri\target\release\bundle\nsis\DesktopPet_0.1.0_x64-setup.exe'
+
+# 安装程序文件名由 tauri.conf.json 的 productName + version 决定，
+# 这里直接读配置拼出来 —— 改名后不必再手改本脚本。
+$confPath = Join-Path $TAURI_DIR 'src-tauri\tauri.conf.json'
+$conf = Get-Content $confPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$setupName = '{0}_{1}_x64-setup.exe' -f $conf.productName, $conf.version
+Write-Host "产品名: $($conf.productName)  版本: $($conf.version)"
+
+$setup = Join-Path $TAURI_DIR "src-tauri\target\release\bundle\nsis\$setupName"
 if (-not (Test-Path $setup)) { throw "找不到安装程序: $setup" }
 Copy-Item $setup $DIST -Force
 
-$f = Get-Item (Join-Path $DIST 'DesktopPet_0.1.0_x64-setup.exe')
+$f = Get-Item (Join-Path $DIST $setupName)
 Write-Host ''
 Write-Host '完成：' -ForegroundColor Green
 Write-Host ("  {0}  ({1:N2} MB)" -f $f.FullName, ($f.Length / 1MB))

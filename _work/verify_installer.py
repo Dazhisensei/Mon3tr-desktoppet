@@ -4,7 +4,7 @@
 
 ## 为什么不用「真的装一遍」
 
-安装程序默认装到 %LOCALAPPDATA%\\DesktopPet 并写注册表卸载项，
+安装程序默认装到 %LOCALAPPDATA%\\<产品名> 并写注册表卸载项，
 这两处都在受控沙箱的**可写范围之外**，静默安装会被拒绝，
 因此「装一遍」在本环境下无法作为验证手段。
 
@@ -21,13 +21,23 @@
 """
 
 import os
+import json
 import re
 import sys
 
 WORK = os.path.dirname(os.path.abspath(__file__))
+TAURI_DIR = os.path.join(WORK, "..", "desktop-pet", "src-tauri")
+CONF_PATH = os.path.join(TAURI_DIR, "tauri.conf.json")
+
+# 安装程序文件名由 tauri.conf.json 的 productName + version 决定，
+# 这里读配置拼出来 —— 改名后不必再手改本脚本。
+with open(CONF_PATH, "r", encoding="utf-8") as _f:
+    _conf = json.load(_f)
+PRODUCT = _conf["productName"]
+VERSION = _conf["version"]
 SETUP = os.path.join(
-    WORK, "..", "desktop-pet", "src-tauri", "target", "release",
-    "bundle", "nsis", "DesktopPet_0.1.0_x64-setup.exe",
+    TAURI_DIR, "target", "release",
+    "bundle", "nsis", f"{PRODUCT}_{VERSION}_x64-setup.exe",
 )
 
 
@@ -47,6 +57,7 @@ def main() -> int:
         if not ok:
             fails.append(name)
 
+    print(f"产品名: {PRODUCT} {VERSION}")
     print(f"文件: {os.path.basename(SETUP)}")
     print(f"大小: {size/1024/1024:.2f} MB\n")
 
@@ -64,7 +75,7 @@ def main() -> int:
     def has(s: str) -> bool:
         return (s in ascii_text) or (s in utf16_text)
 
-    chk("内嵌产品名 DesktopPet", has("DesktopPet"))
+    chk(f"内嵌产品名 {PRODUCT}", has(PRODUCT))
     chk("NSIS 引擎标识（Nullsoft）", has("Nullsoft"))
 
     # 从 tauri-bundler 的模板确认卸载器/快捷方式逻辑存在

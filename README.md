@@ -1,4 +1,4 @@
-# 桌宠项目（DesktopPet）
+# Mon3tr 桌宠（Mon3trPet）
 
 Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 
@@ -12,8 +12,8 @@ Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2。
 
 | 文件 | 说明 |
 |---|---|
-| `DesktopPet_x.y.z_x64-setup.exe` | **安装程序**（推荐），含开始菜单快捷方式与卸载器 |
-| `DesktopPet-x.y.z-win64.zip` | **免安装绿色版**，解压即用 |
+| `Mon3trPet_x.y.z_x64-setup.exe` | **安装程序**（推荐），含开始菜单快捷方式与卸载器 |
+| `Mon3trPet-x.y.z-win64.zip` | **免安装绿色版**，解压即用 |
 
 > **绿色版请放在可写目录**（如桌面、`D:\Tools\`）。
 > 程序会在 exe 同目录生成 `pet-config.json` 与 `webview-data\`，
@@ -1300,8 +1300,8 @@ vendored 模式下必需的 `.cargo-checksum.json`（registry 的解压目录里
 
 | 文件 | 说明 |
 |---|---|
-| `dist\DesktopPet_0.1.0_x64-setup.exe` | **NSIS 安装程序**（推荐分发）|
-| `dist\DesktopPet-0.1.0-win64.zip` | 免安装绿色版（解压即用）|
+| `dist\Mon3trPet_0.1.0_x64-setup.exe` | **NSIS 安装程序**（推荐分发）|
+| `dist\Mon3trPet-0.1.0-win64.zip` | 免安装绿色版（解压即用）|
 
 ### 一条命令构建安装程序
 

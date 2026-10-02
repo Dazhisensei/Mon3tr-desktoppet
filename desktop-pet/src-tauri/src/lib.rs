@@ -852,7 +852,7 @@ pub fn run() {
             // 手动建窗：可显式指定 WebView2 数据目录
             let mut wb =
                 WebviewWindowBuilder::new(handle, "pet", WebviewUrl::App("index.html".into()))
-                    .title("DesktopPet")
+                    .title("Mon3trPet")
                     .inner_size(w, h)
                     .position(cfg.x as f64, cfg.y as f64)
                     .resizable(false)

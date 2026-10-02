@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DesktopPet",
+  "productName": "Mon3trPet",
   "version": "0.1.0",
-  "identifier": "com.deskpet.app",
+  "identifier": "com.dazhisensei.mon3trpet",
   "build": {
     "frontendDist": "../web"
   },
@@ -17,10 +17,10 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "publisher": "DesktopPet",
-    "copyright": "DesktopPet",
-    "shortDescription": "Windows 桌面宠物",
-    "longDescription": "基于 Tauri 2 + Rust + WebView2 的 Windows 桌面宠物，支持自主行为、语音、天气查询与随机关心。",
+    "publisher": "Mon3trPet",
+    "copyright": "Mon3trPet",
+    "shortDescription": "Mon3tr（M3）桌宠",
+    "longDescription": "《明日方舟》干员 Mon3tr（M3）主题的 Windows 桌面宠物，基于 Tauri 2 + Rust + WebView2，支持自主行为、中日双语语音、天气查询与随机关心。",
     "category": "Entertainment",
     "useLocalToolsDir": true,
     "windows": {
