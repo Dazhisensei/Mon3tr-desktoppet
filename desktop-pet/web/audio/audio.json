@@ -1,0 +1,211 @@
+{
+  "format": "opus",
+  "bitrate": "48k",
+  "sampleRate": 48000,
+  "channels": 1,
+  "languages": {
+    "jp": {
+      "label": "日本語",
+      "count": 19,
+      "items": {
+        "交谈1": {
+          "file": "jp/交谈1.ogg",
+          "durationMs": 31156,
+          "bytes": 156573
+        },
+        "交谈2": {
+          "file": "jp/交谈2.ogg",
+          "durationMs": 25454,
+          "bytes": 146828
+        },
+        "交谈3": {
+          "file": "jp/交谈3.ogg",
+          "durationMs": 31036,
+          "bytes": 168559
+        },
+        "任命助理": {
+          "file": "jp/任命助理.ogg",
+          "durationMs": 13056,
+          "bytes": 69851
+        },
+        "信赖提升后交谈1": {
+          "file": "jp/信赖提升后交谈1.ogg",
+          "durationMs": 29446,
+          "bytes": 176433
+        },
+        "信赖提升后交谈2": {
+          "file": "jp/信赖提升后交谈2.ogg",
+          "durationMs": 32473,
+          "bytes": 185372
+        },
+        "信赖提升后交谈3": {
+          "file": "jp/信赖提升后交谈3.ogg",
+          "durationMs": 33110,
+          "bytes": 151690
+        },
+        "周年庆典": {
+          "file": "jp/周年庆典.ogg",
+          "durationMs": 28509,
+          "bytes": 144588
+        },
+        "天气": {
+          "file": "jp/天气.ogg",
+          "durationMs": 4430,
+          "bytes": 24732
+        },
+        "天气失败": {
+          "file": "jp/天气失败.ogg",
+          "durationMs": 4999,
+          "bytes": 31350
+        },
+        "干员报到": {
+          "file": "jp/干员报到.ogg",
+          "durationMs": 23800,
+          "bytes": 121380
+        },
+        "戳一下": {
+          "file": "jp/戳一下.ogg",
+          "durationMs": 4468,
+          "bytes": 26931
+        },
+        "新年祝福": {
+          "file": "jp/新年祝福.ogg",
+          "durationMs": 23098,
+          "bytes": 117347
+        },
+        "晋升后交谈1": {
+          "file": "jp/晋升后交谈1.ogg",
+          "durationMs": 30006,
+          "bytes": 164518
+        },
+        "晋升后交谈2": {
+          "file": "jp/晋升后交谈2.ogg",
+          "durationMs": 28926,
+          "bytes": 162209
+        },
+        "生日": {
+          "file": "jp/生日.ogg",
+          "durationMs": 31361,
+          "bytes": 156948
+        },
+        "精英化晋升1": {
+          "file": "jp/精英化晋升1.ogg",
+          "durationMs": 27648,
+          "bytes": 122704
+        },
+        "精英化晋升2": {
+          "file": "jp/精英化晋升2.ogg",
+          "durationMs": 28106,
+          "bytes": 140264
+        },
+        "闲置": {
+          "file": "jp/闲置.ogg",
+          "durationMs": 4106,
+          "bytes": 25404
+        }
+      }
+    },
+    "zh": {
+      "label": "中文",
+      "count": 19,
+      "items": {
+        "交谈1": {
+          "file": "zh/交谈1.ogg",
+          "durationMs": 19351,
+          "bytes": 88247
+        },
+        "交谈2": {
+          "file": "zh/交谈2.ogg",
+          "durationMs": 18058,
+          "bytes": 97595
+        },
+        "交谈3": {
+          "file": "zh/交谈3.ogg",
+          "durationMs": 23148,
+          "bytes": 109970
+        },
+        "任命助理": {
+          "file": "zh/任命助理.ogg",
+          "durationMs": 9717,
+          "bytes": 49870
+        },
+        "信赖提升后交谈1": {
+          "file": "zh/信赖提升后交谈1.ogg",
+          "durationMs": 15632,
+          "bytes": 85329
+        },
+        "信赖提升后交谈2": {
+          "file": "zh/信赖提升后交谈2.ogg",
+          "durationMs": 17248,
+          "bytes": 87485
+        },
+        "信赖提升后交谈3": {
+          "file": "zh/信赖提升后交谈3.ogg",
+          "durationMs": 22369,
+          "bytes": 101031
+        },
+        "周年庆典": {
+          "file": "zh/周年庆典.ogg",
+          "durationMs": 18376,
+          "bytes": 91094
+        },
+        "天气": {
+          "file": "zh/天气.ogg",
+          "durationMs": 3072,
+          "bytes": 16347
+        },
+        "天气失败": {
+          "file": "zh/天气失败.ogg",
+          "durationMs": 5428,
+          "bytes": 27605
+        },
+        "干员报到": {
+          "file": "zh/干员报到.ogg",
+          "durationMs": 12558,
+          "bytes": 65522
+        },
+        "戳一下": {
+          "file": "zh/戳一下.ogg",
+          "durationMs": 3591,
+          "bytes": 18813
+        },
+        "新年祝福": {
+          "file": "zh/新年祝福.ogg",
+          "durationMs": 12850,
+          "bytes": 66027
+        },
+        "晋升后交谈1": {
+          "file": "zh/晋升后交谈1.ogg",
+          "durationMs": 19702,
+          "bytes": 91934
+        },
+        "晋升后交谈2": {
+          "file": "zh/晋升后交谈2.ogg",
+          "durationMs": 16553,
+          "bytes": 84224
+        },
+        "生日": {
+          "file": "zh/生日.ogg",
+          "durationMs": 15721,
+          "bytes": 81374
+        },
+        "精英化晋升1": {
+          "file": "zh/精英化晋升1.ogg",
+          "durationMs": 13272,
+          "bytes": 63602
+        },
+        "精英化晋升2": {
+          "file": "zh/精英化晋升2.ogg",
+          "durationMs": 12630,
+          "bytes": 71027
+        },
+        "闲置": {
+          "file": "zh/闲置.ogg",
+          "durationMs": 2173,
+          "bytes": 13515
+        }
+      }
+    }
+  },
+  "totalBytes": 3604292
+}

@@ -1,0 +1,17 @@
+# 通过本地中继拉取依赖（代理可用时使用）。
+#
+# 用途：cargo install tauri-cli
+#   cargo install tauri-cli --version "^2" --locked \
+#     --config E:/work/deskpet/M3/_work/cargo-relay.toml
+
+[source.crates-io]
+replace-with = "local-relay"
+
+[source.local-relay]
+registry = "sparse+http://127.0.0.1:8901/index/"
+
+[net]
+retry = 5
+
+[http]
+check-revoke = false

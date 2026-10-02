@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DesktopPet</title>
+<style>
+  /*
+   * 对话气泡：**固定窗口顶部、高度占窗口 60%、内容超出就内部滚动**。
+   *
+   * 曾尝试过两种更"聪明"的方案，都放弃了：
+   *
+   *   1. 贴角色头顶向上生长 —— 头顶以上只有约 20% 空间
+   *      （20% 档仅 29px），放不下，且顶部会被窗口裁掉
+   *   2. 显示气泡时临时扩大窗口 —— 要联动原点偏移、画布缩放、
+   *      穿透坐标换算，环节多，实测反复导致「角色被截断」
+   *
+   * 现在窗口尺寸**完全不变**，因此角色永远不会被裁。
+   * 代价是小窗口下气泡会盖住角色头部，但这是可预期的：
+   * 读文字时并不需要同时看角色。
+   */
+  #bubble {
+    display: none;
+    position: fixed;
+    left: 50%;
+    top: 1.5%;
+    transform: translateX(-50%);
+    z-index: 150;
+
+    /*
+     * 尺寸策略：**由内容决定，只设上限**。
+     *
+     * 曾经是 `height: 60%` 的固定高度。大尺寸下窗口本身就大，
+     * 60% 随之膨胀（100% 档 → 906×704 窗口里一个 422px 高的框），
+     * 而「正在查询天气…」这类一行文本只需要 ~30px，
+     * 于是整块气泡有九成是空的——既挡角色又显得没做完。
+     *
+     * 现在：
+     *   - 宽度仍然撑到上限（文字排版需要确定的换行宽度）
+     *   - **高度不设死**，由内容自然撑开；超过 max-height 才滚动
+     *   - 上下留出 5vh 余量，避免顶到窗口边缘
+     */
+    /*
+     * 宽度：用 `width:max-content + max-width` 组合，
+     * 短句收窄成小气泡，长天气行才撑到上限。
+     *
+     * 只写 `max-width` 是不够的——块级元素默认占满可用宽度，
+     * 一行字的短句也会摊成整窗宽的一条。
+     */
+    width: max-content;
+    max-width: 96%;
+    max-height: 62vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 滚动条细一点，别太抢眼 */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.3) transparent;
+
+    box-sizing: border-box;
+    padding: 8px 12px;
+    border-radius: 10px;
+
+    background: rgba(30, 32, 38, .95);
+    color: #eef1f6;
+    border: 1px solid rgba(255, 255, 255, .16);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+
+    /*
+     * 字号随窗口缩放：用 vw 而非固定 px。
+     * 下限 11px —— 天气数据密度高，再小读不清。
+     */
+    font: 500 clamp(11px, 2.1vw, 15px)/1.5 "Microsoft YaHei", system-ui, sans-serif;
+
+    /* 关键：气泡要可点（点它收起），所以不能 pointer-events:none */
+    pointer-events: auto;
+    cursor: pointer;
+
+    opacity: 0;
+    transition: opacity .3s ease;
+  }
+  #bubble.show { display: block; opacity: 1; }
+  #bubble.hide { opacity: 0; }
+
+  /* 滚动条样式（WebView2 走 webkit 前缀） */
+  #bubble::-webkit-scrollbar { width: 6px; }
+  #bubble::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.3); border-radius: 3px;
+  }
+  #bubble::-webkit-scrollbar-track { background: transparent; }
+
+  /*
+   * 透明窗口的关键：html / body / 容器全部背景透明，
+   * 不能有任何不透明底层，否则会盖住 Tauri 的透明窗口。
+   */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: transparent;
+    user-select: none; -webkit-user-select: none; -webkit-user-drag: none;
+    cursor: grab;
+  }
+  body:active { cursor: grabbing; }
+
+  /*
+   * 画布容器：负责**居中与底部对齐**。
+   *
+   * 拆成两层是因为两种变换会互相覆盖：
+   *   外层 #stageWrap —— 定位（left:50% + translateX(-50%)）
+   *   内层 #stage     —— 朝向翻转（scaleX(-1)）
+   * 如果都写在 canvas 的 transform 上，转身时就会把居中也一起镜像掉，
+   * 角色会左右跳。
+   */
+  #stageWrap {
+    position: fixed;
+    left: 50%;
+    bottom: 0;
+    transform: translateX(-50%);
+    transform-origin: 50% 100%;
+    transition: transform .12s linear;
+  }
+
+  /*
+   * 画布：**保持角色原始尺寸**，锚定容器底部。
+   *
+   * 为什么不用 width/height:100%：显示气泡时窗口会被临时放大
+   * （见 bubble.js 与 Rust 的 expand_for_bubble）。若画布跟着 100%
+   * 拉伸，角色会被**扯变形**，位置也会跳。
+   *
+   * 因此尺寸由 JS 按窗口宽度显式设置（见 main.js 的 fitStage），
+   * 并始终贴住窗口底部——这样无论窗口向上扩展多少，
+   * 角色在屏幕上的位置都**完全不动**，多出来的空间正好给气泡。
+   */
+  #stage {
+    display: block;
+    background: transparent;
+    transform-origin: 50% 100%;
+  }
+
+  /* 提示条（占位功能点击后短暂显示） */
+  #toast {
+    position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%);
+    padding: 5px 13px; border-radius: 6px;
+    background: rgba(30, 32, 38, .95); color: #e8eaee;
+    border: 1px solid rgba(255, 255, 255, .13);
+    font: 12px/1.5 "Microsoft YaHei", system-ui, sans-serif;
+    white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity .18s ease; z-index: 200;
+  }
+  #toast.show { opacity: 1; }
+
+
+  /*
+   * 天气行较长，**必须允许换行**。
+   *
+   * 曾经是 nowrap + ellipsis，而气泡又只有 62% 宽 —— 结果 50% 档以下
+   * 天气行被省略号截断，只显示到"城市 + 气温 + 天气状况"，
+   * 后面的体感/湿度/风力全看不到，像是"内容少了很多"。
+   *
+   * 现在改为正常换行：信息完整优先于"一行一条"的整齐。
+   */
+  #bubble .bubble-line { white-space: normal; overflow-wrap: anywhere; }
+  /* 第一行是问候语，稍作强调 */
+  #bubble .bubble-title { color: #a8c4ff; font-weight: 600; margin-bottom: 2px; }
+  /* 城市天气行：与上一座城市留出间距，便于区分 */
+  #bubble .bubble-city { margin-top: 4px; font-weight: 600; }
+  /* 具体数据行：弱化，与城市行形成层次 */
+  #bubble .bubble-metrics { color: #b9c2d0; font-size: .93em; }
+  /* 生活提醒：比天气行弱化一点，且与上方城市行留出间距 */
+  #bubble .bubble-advice {
+    color: #9fd6a8; font-size: .92em; opacity: .95;
+    margin: 0 0 2px 0; padding-left: 2px;
+    border-left: 2px solid rgba(159,214,168,.35);
+  }
+
+  /* 查询失败：换成警示色，和正常天气区分开 */
+  #bubble[data-kind="error"] {
+    background: rgba(58, 30, 32, .95);
+    border-color: rgba(255, 120, 120, .45);
+  }
+  #bubble[data-kind="error"] .bubble-title { color: #ff9d9d; }
+  #bubble[data-kind="pending"] .bubble-title { color: #9aa3b2; font-weight: 500; }
+
+  /* 随机关心：句子较长，同样依赖自动换行 */
+  #bubble[data-kind="care"] { max-width: 94%; }
+  #bubble[data-kind="care"] .bubble-line { color: #dfe6f0; }
+
+  /*
+   * 小窗口（20%~35% 档）。
+   *
+   * 这些档位宽度太窄，天气行必然折成多行，因此宽度顶满、
+   * 去掉左侧竖线（占宽且小字下不好看）。
+   *
+   * 高度**不在这里覆盖**：上面统一是「由内容撑开 + max-height 封顶」，
+   * 小窗口下 62vh 只有 ~109px（25% 档窗口仅 176px 高），
+   * 天气多城市时会滚动——这是有意保留的，避免气泡吃掉整个窗口。
+   */
+  @media (max-width: 340px) {
+    #bubble {
+      max-width: 99%;
+      max-height: 78vh;
+      padding: 5px 7px;
+      border-radius: 7px;
+    }
+    #bubble .bubble-advice {
+      border-left-width: 0; padding-left: 0; font-size: .95em;
+    }
+    #bubble .bubble-city { margin-top: 3px; }
+  }
+
+  /* ---------- 右键菜单（DOM） ---------- */
+  /*
+   * 曾尝试改用 Tauri 原生菜单（不随窗口移动），但因 Tauri 的 popup()
+   * 会阻塞主线程且不派发菜单事件、自建 Win32 菜单又弹不出来，
+   * 最终仍用 DOM 菜单。
+   *
+   * DOM 菜单会跟着桌宠一起移动 —— 这一点改用「打开菜单时暂停自主行走
+   * 并切到待机」来规避：菜单期间桌宠不会走动，自然就不会「跑掉」。
+   *
+   * 另外菜单限制最大高度并允许滚动：窗口尺寸较小时（如 25% 档
+   * 仅 226×176），菜单项多了会被裁掉、点不到。
+   */
+  #menu {
+    display: none;
+    position: fixed;
+    z-index: 100;
+    min-width: 168px;
+    padding: 4px;
+    border-radius: 8px;
+    background: rgba(30, 32, 38, .97);
+    border: 1px solid rgba(255, 255, 255, .13);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .5);
+    font: 12px/1.45 "Microsoft YaHei", system-ui, sans-serif;
+    color: #e8eaee;
+    max-height: calc(100vh - 6px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.25) transparent;
+  }
+  #menu::-webkit-scrollbar { width: 6px; }
+  #menu::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.25); border-radius: 3px;
+  }
+  #menu .item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 9px; border-radius: 5px; cursor: pointer;
+    white-space: nowrap;
+  }
+  #menu .item:hover { background: rgba(255, 255, 255, .13); }
+  #menu .item[data-on="true"]::after {
+    content: "✓"; color: #6ee787; margin-left: 14px; font-weight: bold;
+  }
+  #menu .item[data-on="false"]::after { content: ""; }
+  #menu .sub { padding: 5px 9px 2px; font-size: 10.5px; color: #8b93a1; }
+  #menu hr {
+    margin: 4px 3px; border: 0;
+    border-top: 1px solid rgba(255, 255, 255, .12);
+  }
+  #menu .danger:hover { background: rgba(255, 90, 90, .25); }
+  #menu .item.todo { color: #9aa3b2; }
+  #menu .item.todo::before {
+    content: "开发中"; float: right; margin-right: 4px;
+    font-size: 10px; color: #ffcc66; opacity: .85;
+  }
+  #menu .item.todo[data-on="true"]::after,
+  #menu .item.todo[data-on="false"]::after { content: ""; }
+
+  /* ---------- 设置面板 ---------- */
+  /*
+   * 设置做成**主窗口内的面板**，而不是独立窗口。
+   *
+   * 独立窗口尝试过两次都失败：WebView2 在同一用户数据目录下创建
+   * 第二个 webview 环境时，要么直接失败（os error 5），
+   * 要么留下「空白且无法关闭」的僵尸窗口。
+   * 主窗口的渲染链路已验证可用，因此设置改为占用主窗口：
+   * 打开时把窗口临时放大（Rust 的 enter_settings_ui），关闭时还原。
+   */
+  #settings {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: #1e2026;
+    color: #e8eaee;
+    font: 13px/1.6 "Microsoft YaHei", system-ui, sans-serif;
+    overflow-y: auto;
+    padding: 14px 16px 18px;
+    cursor: default;
+  }
+  #settings.show { display: block; }
+
+  #settings h1 {
+    margin: 0 0 12px; font-size: 15px; font-weight: 600;
+    color: #f2f4f7; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  #settings .close {
+    font: inherit; font-size: 12px; padding: 4px 12px;
+    border: 1px solid rgba(255,255,255,.16); border-radius: 6px;
+    background: #2f333d; color: #cfd4dd; cursor: pointer;
+  }
+  #settings .close:hover { background: #3a3f4b; }
+
+  #settings section {
+    background: #262932; border-radius: 9px;
+    padding: 11px 13px; margin-bottom: 11px;
+    border: 1px solid rgba(255,255,255,.06);
+  }
+  #settings section > h2 {
+    margin: 0 0 9px; font-size: 12px; font-weight: 600;
+    color: #8ab4ff; letter-spacing: .6px;
+  }
+  #settings .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 0;
+  }
+  #settings .row + .row { border-top: 1px solid rgba(255,255,255,.05); }
+  #settings .label { color: #d6dae2; }
+  #settings .hint { color: #7d8695; font-size: 11.5px; margin-top: 2px; }
+
+  #settings .switch { position: relative; width: 42px; height: 23px; flex: 0 0 auto; }
+  #settings .switch input { opacity: 0; width: 0; height: 0; }
+  #settings .switch .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: #3a3f4b; border-radius: 23px; transition: .18s;
+  }
+  #settings .switch .slider::before {
+    content: ""; position: absolute; width: 17px; height: 17px;
+    left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .18s;
+  }
+  #settings .switch input:checked + .slider { background: #4a7dff; }
+  #settings .switch input:checked + .slider::before { transform: translateX(19px); }
+
+  #settings .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  #settings .seg button {
+    font: inherit; font-size: 12px; padding: 5px 12px;
+    border: 1px solid rgba(255,255,255,.13); border-radius: 6px;
+    background: #2f333d; color: #cfd4dd; cursor: pointer; transition: .15s;
+  }
+  #settings .seg button:hover { background: #373c47; }
+  #settings .seg button.on {
+    background: #4a7dff; border-color: #4a7dff; color: #fff; font-weight: 600;
+  }
+
+  #settings .vol { display: flex; align-items: center; gap: 10px; width: 100%; }
+  #settings input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; height: 4px; border-radius: 2px;
+    background: #3a3f4b; outline: none; cursor: pointer;
+  }
+  #settings input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #4a7dff; cursor: pointer; border: 2px solid #1e2026;
+  }
+  #settings .val {
+    width: 38px; text-align: right; color: #9aa3b2; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #settings .btn {
+    font: inherit; font-size: 12px; padding: 5px 12px;
+    border: 1px solid rgba(255,255,255,.13); border-radius: 6px;
+    background: #2f333d; color: #cfd4dd; cursor: pointer;
+  }
+  #settings .btn:hover { background: #373c47; }
+
+  /* 生日：月 / 日 两个下拉 + 清除 */
+  #settings .birth { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  #settings .birth select {
+    font: inherit; font-size: 12px; padding: 4px 7px;
+    border: 1px solid rgba(255,255,255,.13); border-radius: 6px;
+    background: #2f333d; color: #cfd4dd; cursor: pointer;
+  }
+  #settings .birth select:focus { outline: 1px solid #4a7dff; }
+  #settings .birth .unit { color: #8b93a1; font-size: 12px; }
+
+  /* ---------- 所在地区 ---------- */
+  #settings .cities { display: flex; flex-direction: column; gap: 5px; }
+  #settings .city {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 5px 9px; border-radius: 6px;
+    background: #2f333d; border: 1px solid rgba(255,255,255,.08);
+    font-size: 12px;
+  }
+  #settings .city .cname { color: #e2e6ee; }
+  #settings .city .csub { color: #7d8695; font-size: 11px; margin-left: 6px; }
+  #settings .city button {
+    font: inherit; font-size: 11px; padding: 2px 8px;
+    border: 1px solid rgba(255,255,255,.14); border-radius: 5px;
+    background: #3a3f4b; color: #cfd4dd; cursor: pointer; flex: 0 0 auto;
+  }
+  #settings .city button:hover { background: #464c5a; }
+  #settings .city button.del:hover { background: rgba(255,90,90,.3); }
+
+  #settings .city-add { display: flex; gap: 7px; margin-top: 7px; }
+  #settings .city-add input {
+    flex: 1; font: inherit; font-size: 12px; padding: 5px 9px;
+    border: 1px solid rgba(255,255,255,.13); border-radius: 6px;
+    background: #2f333d; color: #dfe3ea; cursor: text;
+  }
+  #settings .city-add input:focus { outline: 1px solid #4a7dff; }
+  /* 候选列表与已添加列表之间留点距离 */
+  #settings #setCityResults { margin-top: 7px; }
+  #settings .city.pick { cursor: pointer; }
+  #settings .city.pick:hover { background: #3a4152; border-color: #4a7dff; }
+  #settings #setCityHint { min-height: 15px; }
+  #settings #setCityHint.warn { color: #ffcc66; }
+  #settings .note {
+    margin-top: 10px; font-size: 11.5px; color: #6f7787; text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="stageWrap"><canvas id="stage" width="906" height="704"></canvas></div>
+<div id="bubble"></div>
+<div id="toast"></div>
+
+<!-- 设置面板（复用主窗口） -->
+<div id="settings">
+  <h1>
+    <span>桌宠设置</span>
+    <button class="close" id="setClose">关闭</button>
+  </h1>
+
+  <section>
+    <h2>窗口</h2>
+    <div class="row">
+      <div>
+        <div class="label">总在最前</div>
+        <div class="hint">让桌宠始终显示在其他窗口之上</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTop"><span class="slider"></span></label>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">点击穿透</div>
+        <div class="hint">角色以外的透明区域不挡住桌面图标</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setPassthrough"><span class="slider"></span></label>
+    </div>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="label">尺寸</div>
+        <div class="hint" style="margin-bottom:6px">
+          调整桌宠大小（20%~100%）
+        </div>
+        <div class="vol">
+          <input type="range" id="setScale" min="20" max="100" step="1" value="35">
+          <span class="val" id="setScaleVal">35%</span>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="label">位置</div>
+      <button class="btn" id="setBottom">移到屏幕底部</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>声音</h2>
+    <div class="row" style="display:block">
+      <div class="label" style="margin-bottom:8px">音量</div>
+      <div class="vol">
+        <input type="range" id="setVolume" min="0" max="100" step="1" value="70">
+        <span class="val" id="setVolumeVal">70</span>
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="label">语音语言</div>
+        <div class="hint" style="margin-bottom:6px">交谈等功能使用的语音</div>
+        <div class="seg" id="setLangSeg">
+          <button data-lang="zh">中文</button>
+          <button data-lang="jp">日本語</button>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="label">生日</div>
+        <div class="hint" style="margin-bottom:6px">
+          生日当天启动时会播放生日语音
+        </div>
+        <div class="birth">
+          <select id="setBirthMonth"></select>
+          <span class="unit">月</span>
+          <select id="setBirthDay"></select>
+          <span class="unit">日</span>
+          <button class="btn" id="setBirthClear">清除</button>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="label">试听</div>
+      <button class="btn" id="setPreviewVoice">随机播放一条交谈语音</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>所在地区</h2>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="label">天气城市</div>
+        <div class="hint" style="margin-bottom:8px">
+          最多 3 个。点击「天气」时查询这些地方
+        </div>
+
+        <!-- 已添加的城市列表（由 settings-panel.js 渲染） -->
+        <div class="cities" id="setCityList"></div>
+
+        <!-- 搜索并添加 -->
+        <div class="city-add">
+          <input type="text" id="setCityInput" placeholder="输入城市名，如 北京" maxlength="40">
+          <button class="btn" id="setCitySearch">搜索</button>
+        </div>
+
+        <!-- 搜索结果候选（需用户确认，避免同名地点歧义） -->
+        <div class="cities" id="setCityResults"></div>
+        <div class="hint" id="setCityHint"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="note">设置会自动保存</div>
+</div>
+
+<div id="menu">
+  <div class="sub">互动</div>
+  <div class="item" data-cmd="talk">交谈</div>
+  <div class="item" data-cmd="weather">天气</div>
+  <div class="item" data-cmd="toggle-follow">跟随鼠标</div>
+  <div class="item" data-cmd="settings">设置…</div>
+
+  <hr>
+  <div class="sub">动作</div>
+  <div class="item" data-cmd="act:idle">待机</div>
+  <div class="item" data-cmd="act:move">行走</div>
+  <div class="item" data-cmd="act:rest">休息</div>
+  <div class="item" data-cmd="act:sit">坐下</div>
+  <div class="item" data-cmd="act:click">点击特效</div>
+
+  <hr>
+  <div class="item" data-cmd="random">随机行为一次</div>
+  <div class="item" data-cmd="toggle-pause">暂停 / 恢复自主活动</div>
+
+  <hr>
+  <div class="item danger" data-cmd="quit">退出</div>
+</div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

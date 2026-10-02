@@ -1,0 +1,35 @@
+# ---------- 构建产物 ----------
+# Rust 编译输出（约 12 GB）
+desktop-pet/src-tauri/target/
+# Tauri 打包产物
+desktop-pet/src-tauri/gen/
+# 分发包
+dist/
+
+# ---------- 本地工具链 ----------
+# 本项目把 Rust 装在 _work/rust/（非默认路径，约 2.6 GB）
+_work/rust/
+# NSIS 工具链
+_work/nsis/
+
+# ---------- 运行时生成 ----------
+# WebView2 用户数据（首次运行自动生成，约 20 MB）
+webview-data/
+# 窗口位置 / 缩放 / 音量等本地配置
+pet-config.json
+# 运行日志
+pet.log
+
+# ---------- 临时文件 ----------
+# 配置写入用的临时文件（save_config 先写 .tmp 再改名）
+*.json.tmp
+*.tmp
+~$*
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

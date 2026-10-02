@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>桌宠素材预览</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; font-family: "Microsoft YaHei", sans-serif;
+  }
+  /* 四个格子，用绝对定位避免 flex 的尺寸歧义 */
+  .grid { position: fixed; inset: 0; display: grid;
+    grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .cell { position: relative; overflow: hidden;
+    display: block; }
+  .c-dark  { background: #14161a; }
+  .c-light { background: #f2f4f7; }
+  .c-photo { background: linear-gradient(135deg,#ff9a3c 0%,#ff5f6d 45%,#6a5cff 100%); }
+  .c-check {
+    background-color: #eef1f4;
+    background-image:
+      linear-gradient(45deg,#c8ccd2 25%,transparent 25%),
+      linear-gradient(-45deg,#c8ccd2 25%,transparent 25%),
+      linear-gradient(45deg,transparent 75%,#c8ccd2 75%),
+      linear-gradient(-45deg,transparent 75%,#c8ccd2 75%);
+    background-size: 24px 24px;
+    background-position: 0 0,0 12px,12px -12px,-12px 0;
+  }
+  /* 关键：用绝对定位 + 固定宽高比，确保 canvas 一定有尺寸 */
+  .cell canvas {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: auto; height: auto;
+    max-width: 96%; max-height: 96%;
+    display: block;
+  }
+  .tag { position: absolute; top: 6px; left: 8px; z-index: 3;
+    font-size: 12px; padding: 2px 8px; border-radius: 4px;
+    background: rgba(0,0,0,.6); color: #fff; }
+  .hud { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.8); color: #fff; font-size: 13px;
+    padding: 7px 16px; border-radius: 6px; z-index: 10; white-space: nowrap; }
+  .hud button { font: inherit; font-size: 12px; margin-left: 6px;
+    padding: 4px 12px; border: 0; border-radius: 4px; cursor: pointer;
+    background: #4a7dff; color: #fff; }
+  .hud button:hover { background: #6a93ff; }
+</style>
+</head>
+<body>
+
+<div class="grid">
+  <div class="cell c-dark"><span class="tag">深色</span><canvas class="pet"></canvas></div>
+  <div class="cell c-check"><span class="tag">棋盘格</span><canvas class="pet"></canvas></div>
+  <div class="cell c-light"><span class="tag">浅色</span><canvas class="pet"></canvas></div>
+  <div class="cell c-photo"><span class="tag">彩色花纹</span><canvas class="pet"></canvas></div>
+</div>
+
+<div class="hud">
+  <span id="status">载入中…</span>
+  <button data-a="idle">待机</button>
+  <button data-a="move">移动</button>
+  <button data-a="rest">休息</button>
+  <button data-a="click">点击</button>
+</div>
+
+<script>
+(async function () {
+  const canvases = Array.from(document.querySelectorAll('canvas.pet'));
+  const statusEl = document.getElementById('status');
+  let manifest = null, frames = [], cur = 'idle', idx = 0, last = 0;
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  async function loadAction(key) {
+    const act = manifest.actions[key];
+    setStatus('载入 ' + act.name + ' …');
+
+    const imgs = [];
+    for (let i = 1; i <= act.frameCount; i++) {
+      const im = new Image();
+      im.src = 'assets/' + act.dir + '/f' + String(i).padStart(4, '0') + '.png';
+      try { await im.decode(); } catch (e) {}
+      imgs.push(im);
+    }
+
+    frames = imgs;
+    idx = 0;
+    cur = key;
+    last = performance.now();
+
+    // 画布像素尺寸＝素材尺寸；显示尺寸交给 CSS
+    canvases.forEach(function (c) {
+      c.width = manifest.canvas.w;
+      c.height = manifest.canvas.h;
+    });
+
+    draw();
+
+    const first = imgs[0];
+    setStatus(act.name + ' · ' + act.frameCount + ' 帧 · ' +
+      manifest.canvas.w + '×' + manifest.canvas.h + ' · ' +
+      (act.loop ? '循环' : '单次') +
+      ' · 首帧 ' + (first ? first.naturalWidth + '×' + first.naturalHeight : '未载入'));
+  }
+
+  function draw() {
+    const im = frames[idx];
+    if (!im) return;
+    canvases.forEach(function (c) {
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.drawImage(im, 0, 0, c.width, c.height);
+    });
+  }
+
+  function tick(now) {
+    const act = manifest && manifest.actions[cur];
+    if (act && frames.length) {
+      const iv = 1000 / (act.fps || 30);
+      if (now - last >= iv) {
+        last = now;
+        idx++;
+        if (idx >= frames.length) idx = act.loop ? 0 : frames.length - 1;
+        draw();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  Array.from(document.querySelectorAll('button[data-a]')).forEach(function (b) {
+    b.addEventListener('click', function () { loadAction(b.dataset.a); });
+  });
+
+  try {
+    const res = await fetch('assets/actions.json');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    manifest = await res.json();
+    window.__manifest = manifest;
+    await loadAction('idle');
+    requestAnimationFrame(tick);
+    window.__ready = true;
+  } catch (e) {
+    setStatus('载入失败: ' + e);
+    window.__error = String(e);
+    window.__ready = true;
+  }
+})();
+</script>
+</body>
+</html>

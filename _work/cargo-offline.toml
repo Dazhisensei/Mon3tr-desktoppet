@@ -1,0 +1,19 @@
+# 离线构建用的 cargo 覆盖配置。
+#
+# 沙箱内没有网络出口（上游代理 127.0.0.1:7897 不可达），
+# 但 `_work/rust/cargo/registry/src/` 下已解压全部 422 个依赖。
+# 直接把它当作 directory source，即可完全离线编译：
+#
+#   cargo build --offline --config _work/cargo-offline.toml
+#
+# 注意：这是*临时覆盖*，不修改 src-tauri/.cargo/config.toml 里
+# 给用户使用的中继配置。
+
+[source.crates-io]
+replace-with = "vendored"
+
+[source.vendored]
+directory = "E:/work/deskpet/M3/_work/rust/cargo/registry/src/127.0.0.1-add83a09cf6a85ff"
+
+[net]
+offline = true

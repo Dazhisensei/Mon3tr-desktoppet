@@ -1,0 +1,68 @@
+{
+  "canvas": {
+    "w": 906,
+    "h": 704
+  },
+  "sourceCanvas": {
+    "w": 1500,
+    "h": 1000
+  },
+  "crop": {
+    "x": 325,
+    "y": 74,
+    "w": 906,
+    "h": 704
+  },
+  "fps": 30,
+  "format": "png-sequence",
+  "note": "同一坐标系裁切，各动作相对位置保持不变",
+  "actions": {
+    "idle": {
+      "name": "待机",
+      "dir": "idle",
+      "frameCount": 81,
+      "loop": true,
+      "fps": 30,
+      "durationMs": 2700,
+      "bytes": 18058885
+    },
+    "move": {
+      "name": "移动",
+      "dir": "move",
+      "frameCount": 41,
+      "loop": true,
+      "fps": 30,
+      "durationMs": 1367,
+      "bytes": 9031058
+    },
+    "rest": {
+      "name": "休息",
+      "dir": "rest",
+      "frameCount": 51,
+      "loop": true,
+      "fps": 30,
+      "durationMs": 1700,
+      "bytes": 13262269
+    },
+    "click": {
+      "name": "点击",
+      "dir": "click",
+      "frameCount": 67,
+      "loop": false,
+      "fps": 30,
+      "durationMs": 2233,
+      "bytes": 21200556
+    },
+    "sit": {
+      "name": "坐",
+      "dir": "sit",
+      "frameCount": 101,
+      "loop": true,
+      "fps": 30,
+      "durationMs": 3367,
+      "bytes": 9892537
+    }
+  },
+  "totalBytes": 71445305,
+  "totalFrames": 341
+}

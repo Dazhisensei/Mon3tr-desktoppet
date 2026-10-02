@@ -1,0 +1,21 @@
+[source.crates-io]
+replace-with = 'local-relay'
+
+[source.local-relay]
+# 本地明文 HTTP 中继：绕开 cargo 内置 schannel 在沙箱下的凭证问题
+registry = "sparse+http://127.0.0.1:8901/index/"
+
+# 完全离线时的备选源：直接用已解压的 crate 源码目录，
+# 不走索引、不发请求（连中继也不需要）。
+# 启用方式：把上面两行注释掉，改成
+#   [source.crates-io]
+#   replace-with = 'vendored'
+# 然后 `cargo build --offline`。
+[source.vendored]
+directory = "../../../_work/rust/cargo/registry/src/127.0.0.1-add83a09cf6a85ff"
+
+[net]
+retry = 5
+
+[http]
+check-revoke = false
