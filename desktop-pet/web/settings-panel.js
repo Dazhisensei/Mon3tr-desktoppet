@@ -427,7 +427,9 @@ function bind() {
     try {
       const results = await searchCityFn(q);
       if (!results.length) {
-        cityHint('没有找到这个地名，换个写法试试（如「朝阳, 辽宁」）', true);
+        // 提示语要给**不带符号**的例子：早期写的是「朝阳, 辽宁」，
+        // 会让人以为必须打逗号。
+        cityHint('没有找到这个地名。可试试「江苏昆山」或「朝阳区 辽宁」', true);
         return;
       }
       cityHint(`找到 ${results.length} 个结果，点一条添加到列表`);

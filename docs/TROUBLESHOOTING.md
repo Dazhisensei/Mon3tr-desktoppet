@@ -317,11 +317,14 @@ const CLICK_HOLD_MS = 420;   // 原为 80ms
 | `_work/sim.mjs` | 30 分钟行为分布、边缘方向、越界检查 |
 | `_work/sim_transition.mjs` | 切换时序、空档检测 |
 | `_work/sim_e2e.mjs` | 端到端启动时序 |
-| `_work/sim_fixes.mjs` | **加载真实源码**：语法检查、菜单、行走、跟随、坐、语音、天气、关心、休息门槛、尺寸滑条、气泡布局（281 条断言）|
+| `_work/sim_fixes.mjs` | **加载真实源码**：语法检查、菜单、行走、跟随、坐、语音、天气、关心、休息门槛、尺寸滑条、气泡布局、素材外置、离线城市表（318 条断言）|
 | `_work/click_test.mjs` | 单点验证菜单「行走」的行为与显示状态 |
 | `_work/verify_audio_files.mjs` | 语音清单与磁盘文件是否一一对应（12 条断言）|
 | `_work/verify_scale_fix.mjs` | **用 vm 加载真实函数**验证缩放夹取与自愈逻辑（14 项）|
+| `_work/verify_city_search.mjs` | 城市搜索：各种输入写法、零网络请求、覆盖率（100%）|
 | `_work/make_checksums.py` | 为 vendored crate 补 `.cargo-checksum.json`（离线构建必需）|
+| `_work/fetch_amap_coords.py` | 从高德拉取全国省市区坐标（生成内置表）|
+| `_work/inject_city_coords.py` | 把坐标注入 weather.js 的 CN_CITY_COORDS |
 
 **教训**
 

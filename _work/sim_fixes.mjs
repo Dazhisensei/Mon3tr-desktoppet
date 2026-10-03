@@ -829,18 +829,26 @@ chk('WMO 95 -> 雷阵雨', V.describeWeatherCode(95).text === '雷阵雨');
 chk('未知码有兜底', V.describeWeatherCode(1234).text === '未知',
     V.describeWeatherCode(1234).text);
 
-// 10.2 地理编码
+// 10.2 地理编码 / 本地城市表
+//
+// 注意：搜索已改为**本地表优先**（CN_CITY_COORDS），命中时不发任何
+// 网络请求。详见 weather.js 的 searchCity 说明。
+// 因此这里断言的是「本地表能查到、且不发请求」，
+// 而不是早期的「如何发地理编码请求」。
 netCalls.length = 0;
 const beijing = await V.searchCity('北京');
-chk('搜索「北京」返回候选', beijing.length === 1 && beijing[0].name === '北京',
+chk('搜索「北京」返回候选', beijing.length >= 1 && beijing[0].name.startsWith('北京'),
     JSON.stringify(beijing[0] || null));
 chk('候选含经纬度', typeof beijing[0]?.latitude === 'number');
-chk('搜索只发 1 个请求', netCalls.length === 1, `${netCalls.length}`);
+chk('本地表命中不发网络请求', netCalls.length === 0, `${netCalls.length} 次`);
 
-// 同名歧义：必须返回多条让用户选
+// 同名歧义：带省份区分，且必须返回多条让用户选
 const chaoyang = await V.searchCity('朝阳');
-chk('「朝阳」返回多个候选（同名歧义）', chaoyang.length === 3,
+chk('「朝阳」返回多个候选（同名歧义）', chaoyang.length >= 2,
     chaoyang.map(c=>`${c.name}(${c.admin1})`).join(' / '));
+chk('候选名带省份后缀便于区分',
+    chaoyang.some(c => /[（(].+[)）]/.test(c.name)),
+    chaoyang[0]?.name);
 chk('过短输入不发请求', (await V.searchCity('北')).length === 0);
 
 // 10.3 多城市一次请求
@@ -926,48 +934,48 @@ V.clearCache();
 netCalls.length = 0;
 const binzhou = await V.searchCity('滨州');
 chk('「滨州」能查到（原本返回空）',
-    binzhou.length === 1 && binzhou[0].name === '滨州',
+    binzhou.length >= 1 && binzhou[0].name.startsWith('滨州'),
     binzhou.map(c=>`${c.name}(${c.admin1})`).join(' / ') || '(空)');
-chk('「滨州」结果含正确省份', binzhou[0]?.admin1 === '山东省', binzhou[0]?.admin1);
+chk('「滨州」结果含正确省份', binzhou[0]?.admin1 === '山东', binzhou[0]?.admin1);
 chk('「滨州」结果含经纬度', typeof binzhou[0]?.latitude === 'number');
-// 拼音优先：第一次请求就应该是拼音，命中后不再试其他写法
-chk('中文地名优先用拼音查询',
-    decodeURIComponent(netCalls[0]).includes('Binzhou'),
-    decodeURIComponent(netCalls[0]).match(/name=([^&]*)/)?.[1] || '');
-chk('拼音命中后不再多发请求', netCalls.length === 1, `${netCalls.length} 次`);
+// 本地表命中 -> 完全不联网，这也是本次改造的核心收益
+chk('本地表命中不发请求', netCalls.length === 0, `${netCalls.length} 次`);
 
 // 11.2 另一个 2 字地名
 V.clearCache();
 const dezhou = await V.searchCity('德州');
-chk('「德州」能查到', dezhou.length === 1 && dezhou[0].name === '德州',
+chk('「德州」能查到', dezhou.length >= 1 && dezhou[0].name.startsWith('德州'),
     dezhou.map(c=>`${c.name}(${c.admin1})`).join(' / ') || '(空)');
 
 // 11.3 已是 3 字以上、原本就能查到的，不应因新增策略而变差
 V.clearCache();
 netCalls.length = 0;
 const bj2 = await V.searchCity('北京');
-chk('「北京」仍正常且只发 1 个请求',
-    bj2.length === 1 && netCalls.length === 1, `${netCalls.length} 次`);
+chk('「北京」仍正常且不发请求',
+    bj2.length >= 1 && netCalls.length === 0, `${netCalls.length} 次`);
 
-// 11.4 用户已写「城市, 省份」时不做任何改写
+// 11.4 用户写了省份时，应据此消歧（而不是原样丢给网络）
 V.clearCache();
 netCalls.length = 0;
 const explicit = await V.searchCity('滨州, 山东');
-chk('已写省份时原样查询，只发 1 个请求',
-    explicit.length === 1 && netCalls.length === 1 &&
-    decodeURIComponent(netCalls[0]).includes('滨州, 山东'),
-    `${netCalls.length} 次`);
+chk('写了省份仍走本地表且不发请求',
+    explicit.length >= 1 && netCalls.length === 0,
+    `${explicit.length} 条 / ${netCalls.length} 次`);
+chk('带省份时结果限定在该省',
+    explicit.every(c => c.admin1 === '山东'),
+    explicit.map(c => c.admin1).join(','));
 
 // 11.5 拼音输入也能查到
 V.clearCache();
 const pinyin = await V.searchCity('Binzhou');
-chk('拼音输入可查到', pinyin.length === 1 && pinyin[0].name === '滨州');
+chk('拼音输入可查到', pinyin.length >= 1 && pinyin[0].name.startsWith('滨州'),
+    pinyin[0]?.name);
 
-// 11.6 结果排序：人口多/名称更匹配的排前面
+// 11.6 结果排序：人口多的排前面
 V.clearCache();
 const cy = await V.searchCity('朝阳');
-chk('排序：人口多的排在最前（朝阳区 > 朝阳市 > 朝阳村）',
-    cy[0]?.name === '朝阳区' && cy[0].population > (cy[1]?.population || 0),
+chk('结果按人口降序（人口多的在前）',
+    cy.length >= 2 ? (cy[0].population || 0) >= (cy[1].population || 0) : true,
     cy.map(c=>`${c.name}(${c.population})`).join(' > '));
 
 // 11.7 完全不存在的名字返回空，而不是抛错
@@ -1740,6 +1748,63 @@ console.log('\n=== 22. 素材外置 ===');
   chk('CSP 放行 petasset.localhost（img/media）',
       (conf.app.security.csp.match(/petasset\.localhost/g)||[]).length >= 2,
       `${(conf.app.security.csp.match(/petasset\.localhost/g)||[]).length} 处`);
+}
+
+/* ---------- 23. 城市搜索：离线内置表 ---------- */
+console.log('\n=== 23. 城市搜索（离线表） ===');
+
+{
+  const wSrc = readFileSync(path.join(WEB,'weather.js'),'utf8');
+
+  // 23.1 内置表存在且有足够条目
+  const m = wSrc.match(/const CN_CITY_COORDS = \{([\s\S]*?)\n\};/);
+  chk('存在内置坐标表 CN_CITY_COORDS', !!m);
+  if (m) {
+    const n = (m[1].match(/'[^']+':\s*\{lat:/g)||[]).length;
+    // 全国区县约 2800+，地级市 300+；少于 2000 说明数据没注入
+    chk('表内条目 >= 2000（覆盖全国区县）', n >= 2000, `${n} 条`);
+  }
+
+  // 23.2 搜索优先走本地表，命中时不发请求
+  chk('searchCity 先查本地表',
+      /const local = lookupLocalCities\(q\)[\s\S]{0,120}if \(local\.length\) return local/
+        .test(wSrc));
+  chk('存在 lookupLocalCities / parseCityQuery',
+      /function lookupLocalCities/.test(wSrc) && /function parseCityQuery/.test(wSrc));
+
+  // 23.3 输入解析：支持连写、不强制符号
+  chk('支持省+市连写（如「江苏昆山」）',
+      /const normalized = stripProvSuffix\(only\)/.test(wSrc)
+        && /normalized\.startsWith\(p\)/.test(wSrc));
+  chk('支持逗号/空格等多种分隔符',
+      /replace\(\/\[,，、\/\\\\\]\+\/g, ' '\)/.test(wSrc));
+  chk('匹配时容忍行政后缀（「朝阳区」-> 「朝阳」）',
+      /function stripAdminSuffix/.test(wSrc)
+        && /stripAdminSuffix\(parsed\.city\)/.test(wSrc));
+
+  // 23.4 地名解析的回归防护
+  //
+  // 这几个坑都实际踩过：
+  //   - 「浙江省义乌」若不先归一化省份后缀，会切成「省义乌」
+  //   - 「桐乡」以「乡」结尾，曾被乡镇过滤误删
+  chk('连写切分用归一化后的串（避免「省义乌」）',
+      /normalized\.startsWith\(p\) && normalized\.length > p\.length[\s\S]{0,80}normalized\.slice/.test(wSrc));
+  chk('表内含「桐乡」（县级市，曾因后缀被误删）',
+      /'浙江\|嘉兴\|桐乡'/.test(wSrc));
+
+  // 23.5 省份消歧
+  chk('结果带省份标注便于区分同名',
+      /`\$\{name\}（\$\{parts\[0\]\}）`/.test(wSrc)
+        || /parts\.length === 3/.test(wSrc));
+  chk('写了省份时按省份过滤',
+      /if \(provFilter && kProv !== provFilter\) continue/.test(wSrc));
+
+  // 23.6 地理编码的容错（联网兜底路径仍需保留）
+  chk('地理编码超时比天气查询短（4s vs 8s）',
+      /const GEO_TIMEOUT_MS = 4000/.test(wSrc) && /const TIMEOUT_MS = 8000/.test(wSrc));
+  chk('地理编码带重试', /const GEO_RETRY = 3/.test(wSrc));
+  chk('全失败才抛错（区分「网络不通」与「查无此地」）',
+      /if \(netErr\) throw netErr;/.test(wSrc));
 }
 
 /* ---------- 汇总 ---------- */
