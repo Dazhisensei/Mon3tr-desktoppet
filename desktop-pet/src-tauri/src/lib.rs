@@ -88,14 +88,22 @@ fn enter_settings_ui(
     let size = window.outer_size().map_err(|e| e.to_string())?;
     let sf = window.scale_factor().map_err(|e| e.to_string())?;
 
-    // 记下原几何（逻辑像素）
+    // 记下原几何 —— **全部换算成逻辑像素**。
+    //
+    // `outer_position` / `outer_size` 返回的是**物理**像素，
+    // 而还原时用的是 `LogicalPosition`。若这里存物理值、还原时
+    // 按逻辑解释，在 125%/150% 缩放下位置会偏到 (x/1.25, y/1.25)，
+    // 原本在屏幕右下角的窗口会跑到别处、甚至**移出屏幕**
+    // —— 表现为「关闭设置后桌宠消失，但进程还在」。
+    //
+    // 早期版本这里 w/h 除了 sf 而 x/y 没有，是漏改。
     {
         let mut b = state.ui_backup.lock().map_err(|e| e.to_string())?;
         *b = Some(UiBackup {
             w: size.width as f64 / sf,
             h: size.height as f64 / sf,
-            x: pos.x,
-            y: pos.y,
+            x: (pos.x as f64 / sf).round() as i32,
+            y: (pos.y as f64 / sf).round() as i32,
         });
     }
 
@@ -155,12 +163,52 @@ fn exit_settings_ui(
         window
             .set_size(tauri::LogicalSize::new(restore_w, restore_h))
             .map_err(|e| e.to_string())?;
-        let _ = window.set_position(tauri::LogicalPosition::new(bk.x as f64, bk.y as f64));
+
+        // 还原位置前先夹回工作区。
+        //
+        // 即便坐标单位已经统一，仍可能因为「面板期间屏幕分辨率变化」
+        // 「显示器插拔」「多屏切换」等原因，让原位置落在当前工作区之外。
+        // 那种情况下窗口会**跑到屏幕外**，用户看到的就是
+        // 「桌宠消失了，但任务管理器里进程还在」。
+        //
+        // 这里做一次兜底：把位置约束到当前显示器工作区内。
+        let sf = window.scale_factor().unwrap_or(1.0);
+        let mut px = bk.x as f64;
+        let mut py = bk.y as f64;
+
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let wa = monitor.work_area();
+            let to_logical = |v: i32| -> f64 { v as f64 / sf };
+            let work_x = to_logical(wa.position.x);
+            let work_y = to_logical(wa.position.y);
+            let work_w = to_logical(wa.size.width as i32);
+            let work_h = to_logical(wa.size.height as i32);
+
+            let min_x = work_x;
+            let max_x = work_x + work_w - restore_w;
+            let min_y = work_y;
+            let max_y = work_y + work_h - restore_h;
+
+            let cx = px.max(min_x).min(max_x.max(min_x));
+            let cy = py.max(min_y).min(max_y.max(min_y));
+
+            if (cx - px).abs() > 1.0 || (cy - py).abs() > 1.0 {
+                log(&format!(
+                    "exit settings: 位置越界，夹回工作区 ({px:.0},{py:.0}) -> ({cx:.0},{cy:.0})"
+                ));
+            }
+            px = cx;
+            py = cy;
+        }
+
+        let _ = window.set_position(tauri::LogicalPosition::new(px, py));
 
         // 还原后把位置写回配置（与正常拖动一致）
+        //
+        // 注意写的是**夹取后**的坐标：否则下次启动仍会回到屏幕外。
         let mut cfg = load_config();
-        cfg.x = bk.x;
-        cfg.y = bk.y;
+        cfg.x = px.round() as i32;
+        cfg.y = py.round() as i32;
         save_config(&cfg);
 
         // **必须在这里补发缩放事件**。

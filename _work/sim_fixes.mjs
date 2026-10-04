@@ -1807,6 +1807,58 @@ console.log('\n=== 23. 城市搜索（离线表） ===');
       /if \(netErr\) throw netErr;/.test(wSrc));
 }
 
+/* ---------- 24. 用户反馈问题的回归防护 ---------- */
+console.log('\n=== 24. 用户反馈问题的回归防护 ===');
+
+{
+  const bSrc = readFileSync(path.join(WEB,'brain.js'),'utf8');
+  const mSrc = readFileSync(path.join(WEB,'main.js'),'utf8');
+  const rs = readFileSync(path.join(ROOT,'desktop-pet','src-tauri','src','lib.rs'),'utf8');
+
+  // 24.1 走路原地踏步（高刷屏）
+  //
+  // 根因：stepWalk 里 `Math.round(dx)`。144Hz 下每帧仅 0.417px
+  // 被舍成 0，窗口永不移动；120Hz 下 0.5px 进位成 1px，速度翻倍。
+  // 60Hz 恰好是 1.0px 所以完全正常 —— 这正是开发者测不出来的原因。
+  chk('stepWalk 不再每帧 Math.round(dx)',
+      !/const dx = \(BEHAVIOR\.walkSpeed[\s\S]{0,160}Math\.round\(dx\)/.test(bSrc));
+  chk('stepWalk 使用位移累积器 walkAcc',
+      /this\.walkAcc \+=/.test(bSrc) && /Math\.trunc\(this\.walkAcc\)/.test(bSrc));
+  chk('walkAcc 在构造函数中初始化', /this\.walkAcc = 0/.test(bSrc));
+  chk('stepFollow 同样累积（跟随也会踏步）',
+      /this\.followAcc/.test(bSrc) && !/Math\.round\(step\)/.test(bSrc));
+  chk('掉头时清空累积余数（避免反向抖动）',
+      /this\.walkAcc = 0;/.test(bSrc));
+
+  // 24.2 关闭设置后桌宠消失
+  //
+  // 根因：enter_settings_ui 存的是**物理**坐标（outer_position 未除
+  // scale_factor），而 exit_settings_ui 用 LogicalPosition 还原。
+  // 125% 缩放下位置偏到 (x/1.25, y/1.25)，可能移出屏幕。
+  chk('enter_settings_ui 把坐标换算为逻辑像素',
+      /x: \(pos\.x as f64 \/ sf\)\.round\(\) as i32/.test(rs));
+  chk('还原位置时夹回工作区（防移出屏幕）',
+      /位置越界，夹回工作区/.test(rs));
+  chk('还原后把夹取坐标写回配置（下次启动不再跑偏）',
+      /cfg\.x = px\.round\(\) as i32/.test(rs));
+
+  // 24.3 点击穿透无效
+  //
+  // 原实现三处各自 invoke 且不检查返回值，失败完全静默
+  // （桌宠没有 DevTools）—— 与第 15 条 ACL 静默失效同类。
+  chk('穿透调用统一走 applyClickThrough（可观测成败）',
+      /async function applyClickThrough/.test(mSrc));
+  chk('只剩一处裸 invoke(set_click_through)（在封装内）',
+      (mSrc.match(/invoke\('set_click_through'/g)||[]).length === 1,
+      `${(mSrc.match(/invoke\('set_click_through'/g)||[]).length} 处`);
+  chk('失败会统计并提示（不再静默）',
+      /passStats\.setFail\+\+/.test(mSrc) && /点击穿透功能不可用/.test(mSrc));
+  chk('暴露 window.__passthrough 便于现场诊断',
+      /window\.__passthrough = passStats/.test(mSrc));
+  chk('画布与窗口失配时自愈',
+      /function ensureStageMatchesWindow/.test(mSrc));
+}
+
 /* ---------- 汇总 ---------- */
 console.log('\n=== 汇总 ===');
 // 语法检查失败直接计入失败数：前端一行都跑不起来是最严重的问题

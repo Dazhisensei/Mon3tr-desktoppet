@@ -535,6 +535,32 @@ let passthroughNow = false;     // 当前实际状态（避免重复调用）
 /** 临时挂起穿透（菜单/设置面板打开期间），不改用户意图 */
 let passthroughSuspended = false;
 
+/**
+ * 点击穿透的运行统计，供排查用。
+ *
+ * ## 为什么要暴露出来
+ *
+ * 该功能此前**完全静默**：`set_click_through` 失败只走 `console.warn`，
+ * 而桌宠窗口没有 DevTools，用户报「穿透无效」时无从判断
+ * 是「判定没跑」还是「命令调用失败」。
+ *
+ * 现在把关键计数放到 `window.__passthrough`，并在**连续失败**时
+ * 通过 toast 告知用户 —— 与第 15 条（ACL 导致 6 个设置项静默失效）
+ * 是同一类教训：涉及 IPC 的失败**不能让 catch 静默**。
+ */
+const passStats = {
+  polls: 0,          // 轮询次数
+  cursorFails: 0,    // get_cursor_rel 返回空的次数
+  setOk: 0,          // set_click_through 成功次数
+  setFail: 0,        // set_click_through 失败次数
+  lastRel: null,     // 最近一次光标归一化位置
+  lastInside: null,  // 最近一次 inside 判定
+  lastOpaque: null,  // 最近一次「是否落在角色上」
+  lastShouldPass: null,
+  lastError: '',     // 最近一次错误信息
+};
+window.__passthrough = passStats;
+
 /** 采样用的离屏画布：与主画布同步，专门用于读取 alpha */
 const probeCanvas = document.createElement('canvas');
 const probeCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
@@ -639,6 +665,41 @@ function isOpaqueAt(relX, relY) {
   }
 }
 
+/**
+ * 画布与窗口是否失配（用于穿透判定的自愈）。
+ *
+ * ## 为什么需要
+ *
+ * 穿透判定的正确性**强依赖**「画布实际尺寸 == 窗口尺寸」：
+ * `get_cursor_rel` 给的是相对**窗口**的归一化坐标，而 `isOpaqueAt`
+ * 用 `getBoundingClientRect()`（画布）来换算。两者一旦不等，
+ * 同一个光标位置就会映射到画布的错误像素上，
+ * 表现为「透明处判定为角色（挡住桌面）」或「角色处判定为透明（点不到）」。
+ *
+ * 失配的常见来源：设置面板开关、缩放档位切换后
+ * `settings:scale` 事件与 `resize` 的时序差（README 第 16 条记录过同类问题）。
+ *
+ * 这里做一次兜底：发现画布尺寸与窗口明显不符就让 `fitStage()` 重新对齐。
+ * 容差 2px 是为了吸收 DPI 取整误差，避免正常情况被反复纠正。
+ */
+function ensureStageMatchesWindow() {
+  const rect = canvas.getBoundingClientRect();
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  if (!winW || !winH || !rect.width || !rect.height) return;
+
+  const off = Math.abs(rect.width - winW) > 2 || Math.abs(rect.height - winH) > 2;
+  if (off) {
+    // 只在「画布明显不等于窗口」时纠正。
+    // 注意：气泡/面板打开期间窗口可能比画布大，属正常，此时不纠正。
+    const menuOrPanel = menuOpen || settingsOpen() || isBubbleVisible();
+    if (!menuOrPanel) {
+      passStats.stageFixed = (passStats.stageFixed || 0) + 1;
+      fitStage();
+    }
+  }
+}
+
 let cursorPolling = false;
 
 async function pollPassthrough() {
@@ -647,13 +708,19 @@ async function pollPassthrough() {
   // 原因：「跟随鼠标」依赖 lastCursor，而它在下面多条分支里都会提前
   // return（跟随中、拖拽中、菜单打开…）。若把取光标放在 return 之后，
   // 这些情形下 lastCursor 会一直停在上一次的值，跟随就动不起来。
+  passStats.polls++;
   const info = await invoke('get_cursor_rel');
   if (info) lastCursor = info;
+  else passStats.cursorFails++;
+  if (info) {
+    passStats.lastRel = [Number(info.rel_x.toFixed(3)), Number(info.rel_y.toFixed(3))];
+    passStats.lastInside = !!info.inside;
+  }
 
   if (!passthroughWanted || passthroughSuspended) {
     if (passthroughNow) {
       passthroughNow = false;
-      invoke('set_click_through', { enabled: false });
+      applyClickThrough(false);
     }
     return;
   }
@@ -667,7 +734,7 @@ async function pollPassthrough() {
   if (dragging || menuOpen || settingsOpen() || isBubbleVisible() || brain?.following) {
     if (passthroughNow) {
       passthroughNow = false;
-      invoke('set_click_through', { enabled: false });
+      applyClickThrough(false);
     }
     return;
   }
@@ -678,18 +745,58 @@ async function pollPassthrough() {
   let shouldPass;
   if (!info.inside) {
     shouldPass = true;
+    passStats.lastOpaque = null;
   } else if (isOverBubble(info.rel_x, info.rel_y)) {
     // 光标落在气泡上：必须保持可交互（气泡可点击收起）
     shouldPass = false;
+    passStats.lastOpaque = true;
   } else {
     syncProbeCanvas();
-    shouldPass = !isOpaqueAt(info.rel_x, info.rel_y);
+    // 采样前先确认画布与窗口对齐 —— 失配会让 alpha 采样落在错误像素上，
+    // 表现为「透明处挡住桌面」或「角色点不到」。
+    ensureStageMatchesWindow();
+    // 记录判定用的原始几何，便于定位「画布与窗口失配」这类问题
+    const rect = canvas.getBoundingClientRect();
+    passStats.probe = {
+      win: [window.innerWidth, window.innerHeight],
+      rect: [Math.round(rect.left), Math.round(rect.top),
+             Math.round(rect.width), Math.round(rect.height)],
+      canvas: [probeCanvas.width, probeCanvas.height],
+    };
+    const opaque = isOpaqueAt(info.rel_x, info.rel_y);
+    passStats.lastOpaque = opaque;
+    shouldPass = !opaque;
   }
+  passStats.lastShouldPass = shouldPass;
 
   if (shouldPass !== passthroughNow) {
     passthroughNow = shouldPass;
-    await invoke('set_click_through', { enabled: shouldPass });
+    applyClickThrough(shouldPass);
   }
+}
+
+/**
+ * 真正下发穿透开关，并记录成败。
+ *
+ * 抽成函数的原因：调用点有三处（用户关闭穿透、面板打开、状态变化），
+ * 早期三处各自 `invoke(...)` 且**都不检查结果**，失败时完全静默。
+ * 现在统一在这里 await 并统计，连续失败会提示用户。
+ */
+let passFailNotified = false;
+
+async function applyClickThrough(enabled) {
+  const r = await invoke('set_click_through', { enabled });
+  // invoke 失败时返回 undefined；成功时该命令返回 null（Rust 侧 Ok(())）
+  if (r === undefined && window.__TAURI__) {
+    passStats.setFail++;
+    if (!passFailNotified && passStats.setFail >= 3) {
+      passFailNotified = true;
+      // 不能用 toast 遮挡太久；给一次明确提示即可
+      toast('点击穿透功能不可用（详见 console 日志）', 4000);
+    }
+    return;
+  }
+  passStats.setOk++;
 }
 
 /** 启动穿透轮询（约 60ms 一次，足够跟手且开销很低）。 */
@@ -1197,7 +1304,8 @@ async function listenSettingChanges() {
     passthroughWanted = e.payload !== false;
     if (!passthroughWanted && passthroughNow) {
       passthroughNow = false;
-      await invoke('set_click_through', { enabled: false });
+      // 用统一的封装，失败会被统计并提示（早期直接 invoke 会静默）
+      await applyClickThrough(false);
     }
   });
 
@@ -1362,7 +1470,7 @@ async function listenSettingChanges() {
           autonomyPaused = true;
           if (passthroughNow) {
             passthroughNow = false;
-            invoke('set_click_through', { enabled: false });
+            applyClickThrough(false);
           }
         } else {
           passthroughSuspended = false;

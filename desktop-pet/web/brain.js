@@ -144,6 +144,35 @@ export class Brain {
     this.plannedSpan = 0;           // 当前状态的计划时长
     this.dir = 1;                   // 行走方向：1 向右，-1 向左
     this.longWalk = false;
+
+    /**
+     * 行走的**小数位移累积器**。
+     *
+     * ## 为什么需要它
+     *
+     * 窗口坐标是整数（像素），但每帧的位移可能是小数：
+     *
+     *     walkSpeed = 60 px/s
+     *     60Hz  -> 每帧 1.000 px
+     *     120Hz -> 每帧 0.500 px
+     *     144Hz -> 每帧 0.417 px
+     *
+     * 早期实现直接 `Math.round(dx)` 再加到坐标上，导致两个问题：
+     *
+     *   - **≥144Hz：每帧不足 0.5px，四舍五入成 0** —— 窗口永远不动，
+     *     表现为「走路时原地踏步」。高刷屏用户必然遇到，60Hz 用户
+     *     完全复现不了。
+     *   - **75~120Hz：0.5~0.99px 被进位成 1px** —— 实际速度变成
+     *     「1px × 帧率」，120Hz 下走成 120px/s，是设定值的两倍。
+     *
+     * 正确做法是**累积小数、只把整数部分落到坐标上**：
+     * 余数留到下一帧继续累加，长期平均速度就精确等于 walkSpeed，
+     * 且与刷新率无关。
+     */
+    this.walkAcc = 0;
+
+    /** 跟随的位移累积器，理由同 walkAcc（高刷屏下同样会被取整吃掉）。 */
+    this.followAcc = 0;
     this.holdUntil = 0;             // 拖拽后的短暂静默（基于时间戳，必然过期）
     /**
      * 最近一次用户交互的时间戳。
@@ -301,8 +330,16 @@ export class Brain {
       BEHAVIOR.followSpeedMax,
     );
 
-    const step = (speed * dir * dtMs) / 1000;
-    let nx = sc.win_x + Math.round(step);
+    // 与自主行走一样：**累积小数位移**，不能每帧 Math.round。
+    // 跟随速度常落在 130~320 px/s，但高刷屏（144Hz）下
+    // 130px/s 每帧仅 0.90px，某些帧仍会不足 0.5 而被舍去，
+    // 表现为跟随时的抖动或走不动。
+    this.followAcc = (this.followAcc || 0) + (speed * dir * dtMs) / 1000;
+    const move = Math.trunc(this.followAcc);
+    if (move === 0) return;      // 没攒够 1px，余数留到下一帧
+    this.followAcc -= move;
+
+    let nx = sc.win_x + move;
 
     // 与自主行走一样，约束在工作区内
     const left = sc.work_x;
@@ -461,8 +498,19 @@ export class Brain {
     const sc = this.getScreen();
     if (!sc) return;
 
-    const dx = (BEHAVIOR.walkSpeed * this.dir * dtMs) / 1000;
-    let nx = sc.win_x + Math.round(dx);
+    // 累积小数位移，只把整数部分落到坐标上。
+    //
+    // 不能直接 `Math.round(dx)`：144Hz 下每帧只有 0.417px，
+    // 四舍五入成 0 -> 窗口永远不动（原地踏步）；
+    // 而 120Hz 下 0.5px 进位成 1px -> 速度翻倍。
+    // 累积余数后，长期平均速度精确等于 walkSpeed，与刷新率无关。
+    this.walkAcc += (BEHAVIOR.walkSpeed * this.dir * dtMs) / 1000;
+    const step = Math.trunc(this.walkAcc);
+    // 没攒够 1px 就不动窗口（余数保留）
+    if (step === 0) return;
+    this.walkAcc -= step;
+
+    let nx = sc.win_x + step;
 
     // 工作区左右边界（窗口不能越界）
     const left = sc.work_x;
@@ -480,6 +528,9 @@ export class Brain {
     }
 
     if (hitEdge) {
+      // 掉头时清掉累积余数：它属于旧方向，留着会让新方向
+      // 一开始就多走一点，看起来像「抖动一下」。
+      this.walkAcc = 0;
       this.onTurn(this.dir);
       if (this.longWalk) {
         // 长途行走抵达边缘后，再走一小段就结束
