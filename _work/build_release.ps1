@@ -27,8 +27,14 @@ $TAURI    = Join-Path $ROOT 'desktop-pet'
 $WEB      = Join-Path $TAURI 'web'
 $WEBDIST  = Join-Path $TAURI 'web-dist'
 $OUT      = Join-Path $ROOT 'dist\Mon3trPet'
-$ZIP      = Join-Path $ROOT 'dist\Mon3trPet-0.1.0-win64.zip'
 $OFFLINE  = Join-Path $PSScriptRoot 'cargo-offline.toml'
+
+# ZIP 名带版本号，从 tauri.conf.json 读取 —— 避免升版本时漏改本脚本
+# （早期硬编码成 0.1.0，改版本后产物名会对不上）
+$conf = Get-Content (Join-Path $TAURI 'src-tauri\tauri.conf.json') -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+$ZIP = Join-Path $ROOT ("dist\{0}-{1}-win64.zip" -f $conf.productName, $conf.version)
+Write-Host "产物版本: $($conf.productName) $($conf.version)"
 
 $env:CARGO_HOME  = Join-Path $PSScriptRoot 'rust\cargo'
 $env:RUSTUP_HOME = Join-Path $PSScriptRoot 'rust\rustup'
