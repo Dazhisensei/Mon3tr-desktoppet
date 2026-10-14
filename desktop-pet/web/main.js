@@ -72,6 +72,27 @@ let brain = null;
 let autonomyPaused = false;
 
 /**
+ * 是否允许桌宠**自主走动**（用户可关，会持久化）。
+ *
+ * 与 `autonomyPaused` 的分工：
+ *   - `autonomyPaused`：全部自主行为停摆（菜单里的「暂停自主活动」）
+ *   - `walkEnabled`：只停「位移」，待机/休息/互动照常
+ *
+ * 有用户反馈「走来走去干扰视线，但点坐下或暂停又太重」——
+ * 暂停会连关心语句与待机动画一起停掉，所以才单独做了这个开关。
+ */
+let walkEnabled = true;
+
+/** 把「是否允许走动」写入配置（失败不致命，下次仍用默认值）。 */
+async function saveWalkEnabled(enabled) {
+  const r = await invoke('set_walk_enabled', { enabled: !!enabled });
+  if (r === undefined && window.__TAURI__) {
+    // 不静默：设置没存下来是个真问题（README 第 15 条的教训）
+    console.warn('set_walk_enabled 失败，本次设置不会保留');
+  }
+}
+
+/**
  * 用户设置的生日（{month, day} 或 null）。
  * 启动时用于判断是否播生日语音；设置面板改动后由事件同步。
  */
@@ -808,6 +829,64 @@ function startPassthroughPolling() {
   }, 60);
 }
 
+/* ---------- 智能避让轮询 ---------- */
+
+/** 是否开启智能避让（从配置读取，设置面板可改）。 */
+let smartDodge = false;
+
+/** 上一次的前台判定，避免重复触发进入/退出。 */
+let lastForegroundApp = null;
+
+/** 连续满足条件的次数，用于**去抖**。 */
+let fgStreak = 0;
+const FG_DEBOUNCE = 2;      // 连续 2 次（约 3 秒）才切换，避免来回闪
+
+/**
+ * 轮询前台窗口，决定桌宠是否该躲开。
+ *
+ * ## 为什么间隔取 1500ms
+ *
+ * 这个功能对实时性要求很低（用户切窗口后桌宠晚一秒躲开完全可以接受），
+ * 而 `GetForegroundWindow` 每次都要跨进程 IPC。间隔太短会白白耗电
+ * —— 桌面端虽不如手机敏感，但也没必要。
+ *
+ * ## 为什么要去抖
+ *
+ * 用户按 Alt+Tab 时会短暂出现"没有前台窗口"或中间态窗口。
+ * 不去抖的话桌宠会**快速坐下又站起**，看起来像抽搐。
+ * 因此要求连续 N 次判定一致才真正切换。
+ */
+function startDodgePolling() {
+  setInterval(async () => {
+    if (!smartDodge || !brain) return;
+
+    // 菜单/设置面板打开、正在拖动时不打扰
+    if (dragging || menuOpen || settingsOpen()) return;
+
+    const info = await invoke('get_foreground_info');
+    if (!info) return;
+
+    // 有程序在前台（且不是我们、不是桌面/任务栏）-> 躲开
+    const shouldDodge = !!info.is_app;
+
+    if (shouldDodge === lastForegroundApp) {
+      fgStreak = 0;
+      return;
+    }
+    fgStreak++;
+    if (fgStreak < FG_DEBOUNCE) return;
+
+    fgStreak = 0;
+    lastForegroundApp = shouldDodge;
+
+    if (shouldDodge) {
+      if (!brain.sitting) brain.enterDodge(performance.now());
+    } else {
+      if (brain.dodging) brain.exitDodge(performance.now());
+    }
+  }, 1500);
+}
+
 /* ---------- 屏幕信息（带缓存） ---------- */
 
 /**
@@ -869,26 +948,46 @@ function clickDurationMs() {
 
 let dragging = false;
 
+/**
+ * 拖拽。
+ *
+ * ## 位置不在前端算
+ *
+ * 窗口移动完全交给**系统原生拖动**（Rust 侧调 `start_dragging()`，
+ * Windows 上是 `WM_NCLBUTTONDOWN` / `HTCAPTION`）。
+ * 前端只负责在拖动结束时判断「这是点击还是拖动」。
+ *
+ * 早期是前端 `mousemove` -> `invoke('drag_move')` -> `set_position`
+ * 手动模拟，问题是：**窗口追着鼠标跑，鼠标一快就跑到窗口外，
+ * `mousemove` 立即断掉**，窗口卡住、指针回来才继续 ——
+ * 用户看到的就是「不跟手、漂移」。
+ *
+ * 原生拖动由 OS 维护鼠标捕获，指针移出窗口也照常，因此没有这个问题。
+ */
 canvas.addEventListener('mousedown', async (e) => {
   if (e.button !== 0) return;
   dragging = true;
   brain?.holdUser();
   markUserActivity();
+  // 这条指令会让系统进入原生拖动循环
   await invoke('drag_start', { x: e.screenX, y: e.screenY });
 });
 
-window.addEventListener('mousemove', async (e) => {
-  if (!dragging) return;
-  await invoke('drag_move', { x: e.screenX, y: e.screenY });
-});
-
-window.addEventListener('mouseup', async () => {
+document.addEventListener('mouseup', async () => {
   if (!dragging) return;
   dragging = false;
   brain?.holdUser();
   await refreshScreen(true);
+  // 判断「点击 / 拖动」的阈值在 Rust 侧（单一来源），
+  // 它靠 mousemove 上报的位移来算，这里无需重复计算。
   const wasClick = await invoke('drag_end');
-  if (wasClick) playClick();
+  if (wasClick) {
+    playClick();
+  } else if (brain) {
+    // 用户手动摆放过位置 -> 智能避让不再自动挪动它。
+    // 「特意放的地方被程序挪走」是很烦人的体验。
+    brain.userPlaced = true;
+  }
 });
 
 /**
@@ -1023,6 +1122,12 @@ function syncMenu() {
     if (c === 'act:sit') {
       el.textContent = brain?.sitting ? '起身' : '坐下';
       el.dataset.on = String(!!brain?.sitting);
+    }
+    // 走动开关也用「文字随状态变」的写法：默认显示动作（禁止走动），
+    // 已禁止时显示反向动作（允许走动）——与「跟随鼠标/取消跟随」一致。
+    if (c === 'toggle-walk') {
+      el.textContent = walkEnabled ? '禁止走动' : '允许走动';
+      el.dataset.on = String(!walkEnabled);
     }
   });
 }
@@ -1188,6 +1293,14 @@ async function runMenuCommand(cmd) {
       brain.until = performance.now();
       break;
 
+    case 'toggle-walk':
+      // 只开关「自主走动」，不影响待机/休息/互动。
+      // 与「暂停自主活动」的区别：后者是全部自主行为停摆，语义过重。
+      walkEnabled = !walkEnabled;
+      brain.setWalkEnabled(walkEnabled, performance.now());
+      await saveWalkEnabled(walkEnabled);
+      break;
+
     case 'toggle-pause':
       autonomyPaused = !autonomyPaused;
       if (autonomyPaused) {
@@ -1317,6 +1430,25 @@ async function listenSettingChanges() {
     await refreshScreen(true);
   });
 
+  // 自主走动开关（菜单里切换后由 Rust 广播，保持两处状态一致）
+  await safe('settings:walk-enabled', (e) => {
+    const on = e.payload !== false;
+    if (on === walkEnabled) return;   // 自己触发的回声，忽略
+    walkEnabled = on;
+    brain?.setWalkEnabled(on, performance.now());
+    syncMenu();
+  });
+
+  // 智能避让开关
+  await safe('settings:smart-dodge', (e) => {
+    const on = e.payload !== false;
+    if (on === smartDodge) return;
+    smartDodge = on;
+    brain?.setSmartDodge(on);
+    fgStreak = 0;
+    lastForegroundApp = null;
+  });
+
   // 音量：立即作用于新播放的语音，并调整正在播放的那条
   await safe('settings:volume', (e) => setVoiceVolume(e.payload));
 
@@ -1375,6 +1507,10 @@ async function listenSettingChanges() {
       weatherCities = Array.isArray(cfg.weather_cities) ? cfg.weather_cities : [];
       // 缩放：画布尺寸以它为准（不随气泡扩窗变化）
       if (typeof cfg.scale === 'number' && cfg.scale > 0) userScale = cfg.scale;
+      // 是否允许自主走动（用户上次的选择）
+      if (typeof cfg.walk_enabled === 'boolean') walkEnabled = cfg.walk_enabled;
+      // 智能避让
+      if (typeof cfg.smart_dodge === 'boolean') smartDodge = cfg.smart_dodge;
     }
 
     // 语音：先载入清单并应用音量/语言，再按启动规则播一条
@@ -1418,6 +1554,13 @@ async function listenSettingChanges() {
       // 跟随鼠标需要光标位置；由原生侧提供（穿透开启后前端收不到 mousemove）
       getCursor: () => lastCursor,
     });
+
+    // 应用用户保存的「是否允许走动」。
+    // 必须在 Brain 建好之后：setWalkEnabled 在关闭时可能要切状态。
+    brain.setWalkEnabled(walkEnabled, performance.now());
+    // 智能避让（默认关闭，用户开启后才轮询）
+    brain.setSmartDodge(smartDodge);
+    startDodgePolling();
 
     await setAction('idle', { force: true });
     await refreshScreen(true);

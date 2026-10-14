@@ -438,6 +438,31 @@
       </div>
       <label class="switch"><input type="checkbox" id="setPassthrough"><span class="slider"></span></label>
     </div>
+    <div class="row">
+      <div>
+        <div class="label">允许自主走动</div>
+        <div class="hint">
+          关闭后不再在屏幕上移动，但待机、点击、语音等一切照常
+        </div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setWalk"><span class="slider"></span></label>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">开机自动启动</div>
+        <div class="hint">登录后自动运行，可在任务管理器 → 启动 中禁用</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setAutostart"><span class="slider"></span></label>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">智能避让</div>
+        <div class="hint">
+          有其他程序在前台时自动到角落坐下，回到桌面再站起来
+        </div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setDodge"><span class="slider"></span></label>
+    </div>
     <div class="row" style="align-items:flex-start">
       <div style="flex:1">
         <div class="label">尺寸</div>
@@ -541,6 +566,8 @@
 
   <hr>
   <div class="item" data-cmd="random">随机行为一次</div>
+  <!-- 切换式：文字随状态变化，与「跟随鼠标」「坐下」同一模式 -->
+  <div class="item" data-cmd="toggle-walk">禁止走动</div>
   <div class="item" data-cmd="toggle-pause">暂停 / 恢复自主活动</div>
 
   <hr>

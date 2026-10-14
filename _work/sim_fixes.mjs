@@ -99,6 +99,8 @@ const toast = { textContent:'', classList:{ _s:new Set(),
 // 设置面板：DOM 桩需要提供面板相关元素
 const setIds = ['settings','setClose','setTop','setPassthrough','setScale','setScaleVal',
                 'stageWrap',
+                // 新增的三个开关（走动 / 自启 / 智能避让）
+                'setWalk','setAutostart','setDodge',
                 'setBottom','setVolume','setVolumeVal','setLangSeg',
                 'setBirthMonth','setBirthDay','setBirthClear','setPreviewVoice',
                 'setCityList','setCityInput','setCitySearch','setCityResults','setCityHint',
@@ -145,6 +147,10 @@ globalThis.document = {
                      : id==='toast' ? toast : (panelEls[id] || null),
   body:{ innerHTML:'' },
   querySelectorAll: () => [],
+  // 拖拽与鼠标事件的监听现在绑在 document 上（原生拖动时鼠标可能
+  // 已离开窗口，document 比 window 更可靠）。桩也要提供。
+  __h:{},
+  addEventListener(t,f){ (this.__h[t]=this.__h[t]||[]).push(f); },
   createElement: (tag) => tag === 'option'
     ? { value:'', textContent:'' }
     : makeCanvas(),
@@ -1857,6 +1863,82 @@ console.log('\n=== 24. 用户反馈问题的回归防护 ===');
       /window\.__passthrough = passStats/.test(mSrc));
   chk('画布与窗口失配时自愈',
       /function ensureStageMatchesWindow/.test(mSrc));
+}
+
+/* ---------- 25. 用户建议的四项功能 ---------- */
+console.log('\n=== 25. 用户建议的四项功能 ===');
+
+{
+  const bSrc = readFileSync(path.join(WEB,'brain.js'),'utf8');
+  const mSrc = readFileSync(path.join(WEB,'main.js'),'utf8');
+  const pSrc = readFileSync(path.join(WEB,'settings-panel.js'),'utf8');
+  const hSrc = readFileSync(path.join(WEB,'index.html'),'utf8');
+  const rs = readFileSync(path.join(ROOT,'desktop-pet','src-tauri','src','lib.rs'),'utf8');
+
+  // 25.1 拖动漂移 -> 改用系统原生拖拽
+  //
+  // 原先前端 mousemove -> IPC -> set_position 手动模拟，
+  // 鼠标一快就移出窗口、mousemove 断掉，表现为漂移。
+  chk('Rust 改用 start_dragging（系统原生拖动）',
+      /window\.start_dragging\(\)/.test(rs));
+  chk('drag_move 不再移动窗口（只统计点击/拖动）',
+      !/set_position\(tauri::LogicalPosition::new\(nx as f64/.test(rs));
+  chk('前端不再每次 mousemove 都发 IPC',
+      !/mousemove',\s*async\s*\(e\)\s*=>\s*\{\s*if\s*\(!dragging\)\s*return;\s*await\s*invoke\('drag_move'/
+        .test(mSrc));
+  // 注意：注释里仍会提到 start_window（解释「为何不再需要」），
+  // 因此只检查**代码**中不再引用该字段。
+  chk('DragState 不再保存 start_window（已无用途）',
+      !/start_window\s*:/.test(rs) && !/d\.start_window/.test(rs));
+
+  // 25.2 走动开关（只停位移，不停互动）
+  chk('Brain 有 walkEnabled 与 setWalkEnabled',
+      /this\.walkEnabled/.test(bSrc) && /setWalkEnabled\(/.test(bSrc));
+  chk('decideNext 在关闭走动时改走待机（而非静止）',
+      /if \(!this\.walkEnabled\)[\s\S]{0,60}enterIdle/.test(bSrc));
+  chk('关闭走动时若正在行走会切回待机',
+      /!this\.walkEnabled && this\.state === S\.WALK/.test(bSrc));
+  chk('菜单有「禁止/允许走动」切换项',
+      /data-cmd="toggle-walk"/.test(hSrc));
+  chk('菜单文字随状态变（与跟随/坐下同模式）',
+      /walkEnabled \? '禁止走动' : '允许走动'/.test(mSrc));
+  chk('走动开关持久化到配置',
+      /fn set_walk_enabled/.test(rs) && /walk_enabled/.test(rs));
+
+  // 25.3 开机自启
+  //
+  // 注册表路径抽成了常量 AUTOSTART_KEY，不在 args 里字面出现，
+  // 因此断言要查常量定义本身。
+  chk('实现 set_autostart', /fn set_autostart/.test(rs));
+  chk('注册表键带 HKCU 前缀（reg.exe 必需，否则 Invalid key name）',
+      rs.includes('r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"'),
+      'AUTOSTART_KEY 定义');
+  chk('路径加引号（安装目录可能含空格）',
+      // 源码里是 format!("\"{path}\"")：外层的 \" 就是字面引号
+      rs.includes('let quoted = format!("\\"{path}\\"")'),
+      (rs.match(/let quoted = .*/) || ['(未找到)'])[0].trim());
+  chk('提供 get_autostart 查询实际状态',
+      /fn get_autostart/.test(rs));
+  chk('自启状态以注册表为准而非配置',
+      /以\*\*注册表实际状态\*\*为准/.test(rs));
+  chk('设置面板有自启开关', /id="setAutostart"/.test(hSrc));
+
+  // 25.4 智能避让
+  chk('实现前台窗口检测 get_foreground_info',
+      /fn get_foreground_info/.test(rs));
+  chk('排除桌面/任务栏等伪前台（否则永远不站起来）',
+      /Progman/.test(rs) && /Shell_TrayWnd/.test(rs) && /WorkerW/.test(rs));
+  chk('Brain 有 enterDodge / exitDodge',
+      /enterDodge\(/.test(bSrc) && /exitDodge\(/.test(bSrc));
+  chk('用户手动摆过位置时不挪动（只坐下）',
+      /userPlaced/.test(bSrc) && /if \(!this\.userPlaced\)/.test(bSrc));
+  chk('轮询带去抖（避免切窗口时反复坐站）',
+      /FG_DEBOUNCE/.test(mSrc));
+  chk('轮询间隔较长（省电，实时性要求低）',
+      /\}, 1500\);/.test(mSrc));
+  chk('设置面板有智能避让开关', /id="setDodge"/.test(hSrc));
+  chk('关闭避让时若正坐着会自动站起',
+      /!this\.smartDodge && this\.dodging/.test(bSrc));
 }
 
 /* ---------- 汇总 ---------- */

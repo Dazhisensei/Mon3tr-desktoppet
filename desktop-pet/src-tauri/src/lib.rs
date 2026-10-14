@@ -41,11 +41,14 @@ fn log(msg: &str) {
     }
 }
 
+/// 拖拽状态。
+///
+/// 只用于区分「点击」与「拖动」—— 窗口位置已交给系统原生拖动，
+/// 因此不再需要记录窗口起始坐标。
 #[derive(Default)]
 struct DragState {
     active: bool,
     start_cursor: (f64, f64),
-    start_window: (i32, i32),
     moved: f64,
 }
 
@@ -234,6 +237,38 @@ fn get_window_pos(window: WebviewWindow) -> Result<(i32, i32), String> {
     Ok((p.x, p.y))
 }
 
+/// 开始拖拽 —— 交给**操作系统**处理。
+///
+/// ## 为什么不再自己算位移
+///
+/// 早期实现是前端 `mousemove` -> IPC -> `set_position` 手动模拟：
+///
+///     window.addEventListener('mousemove', e =>
+///       invoke('drag_move', { x: e.screenX, y: e.screenY }));
+///
+/// 三个问题叠加，表现为用户反馈的「拖动不跟手、会漂移」：
+///
+///   1. **鼠标移出窗口就收不到事件**。窗口追着鼠标跑，鼠标移动快于
+///      窗口跟进时指针就到了窗口外，`mousemove` 立刻停止触发，
+///      窗口卡住；指针回来才继续 —— 观感就是一顿一顿地漂。
+///   2. 每次移动都跨进程 IPC，受 WebView 事件频率限制，
+///      低于鼠标实际采样率。
+///   3. 没有 pointer capture，指针离开元素后事件就断了。
+///
+/// 现在改为 `start_dragging()`：tao 在 Windows 上走的是
+/// `handle_os_dragging(HTCAPTION)` —— 向窗口投递 `WM_NCLBUTTONDOWN`，
+/// 由系统进入**原生拖动循环**。位置由 OS 直接更新，
+/// 不经过 JS、不经过 IPC，因此无漂移、无延迟。
+///
+/// ## 为什么这次可以用原生方案
+///
+/// README 记录过「原生右键菜单」失败：`TrackPopupMenu` 是**同步阻塞**的，
+/// 会冻住消息循环。而 `handle_os_dragging` 用的是 `PostMessageW`
+/// （投递消息、立即返回），**不阻塞**，因此没有那个问题。
+///
+/// `ReleaseCapture()` 由 tao 内部调用，使后续 `WM_NCLBUTTONDOWN` 生效；
+/// 拖动期间窗口会临时获得鼠标捕获 —— 这正是「指针移出窗口仍能继续拖」
+/// 的保证，也是修复漂移的关键。
 #[tauri::command]
 fn drag_start(
     window: WebviewWindow,
@@ -241,24 +276,29 @@ fn drag_start(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
-    // 统一到逻辑坐标：鼠标 screenX/Y 是 CSS 像素（逻辑），
-    // outer_position 是物理像素，必须先换算，否则 125% 缩放下拖拽会偏移。
-    let sf = window.scale_factor().map_err(|e| e.to_string())?;
-    let mut d = state.drag.lock().map_err(|e| e.to_string())?;
-    d.active = true;
-    d.start_cursor = (x, y);
-    d.start_window = (
-        (pos.x as f64 / sf).round() as i32,
-        (pos.y as f64 / sf).round() as i32,
-    );
-    d.moved = 0.0;
-    Ok(())
+    // 记录起点**仅用于** drag_end 判断「这是点击还是拖动」。
+    // 位置更新已交给系统，不再需要记录 start_window。
+    {
+        let mut d = state.drag.lock().map_err(|e| e.to_string())?;
+        d.active = true;
+        d.start_cursor = (x, y);
+        d.moved = 0.0;
+    }
+
+    window.start_dragging().map_err(|e| {
+        log(&format!("start_dragging failed: {e}"));
+        e.to_string()
+    })
 }
 
+/// 拖动过程中前端上报位置（**仅用于区分点击/拖动**）。
+///
+/// 不再移动窗口 —— 位置由系统原生拖动循环负责。
+/// 保留这个命令是为了不改前端调用点，同时让「拖动距离超过阈值
+/// 就不算点击」这个判定继续有效。
 #[tauri::command]
 fn drag_move(
-    window: WebviewWindow,
+    _window: WebviewWindow,
     state: tauri::State<'_, AppState>,
     x: f64,
     y: f64,
@@ -270,11 +310,6 @@ fn drag_move(
     let dx = x - d.start_cursor.0;
     let dy = y - d.start_cursor.1;
     d.moved = (dx * dx + dy * dy).sqrt();
-    let nx = d.start_window.0 + dx.round() as i32;
-    let ny = d.start_window.1 + dy.round() as i32;
-    window
-        .set_position(tauri::LogicalPosition::new(nx as f64, ny as f64))
-        .map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -435,6 +470,18 @@ struct PetConfig {
     /// 不必每次重新做地理编码。
     #[serde(default)]
     weather_cities: Vec<City>,
+    /// 是否允许桌宠**自主走动**。
+    ///
+    /// 关闭后桌宠不再在屏幕上位移，但待机/休息/互动/语音全部照常。
+    /// 与「暂停自主活动」不同：那个是全部自主行为停摆。
+    #[serde(default = "default_true")]
+    walk_enabled: bool,
+    /// 开机自动启动。默认关闭（绿色版不该擅自改用户的开机项）。
+    #[serde(default)]
+    autostart: bool,
+    /// 智能避让：有其他程序在前台时自动靠边坐下，回到桌面再站起来。
+    #[serde(default)]
+    smart_dodge: bool,
 }
 
 /// 已配置的城市。
@@ -503,6 +550,9 @@ impl Default for PetConfig {
             voice_lang: default_lang(),
             birthday: None,
             weather_cities: Vec::new(),
+            walk_enabled: true,
+            autostart: false,
+            smart_dodge: false,
         }
     }
 }
@@ -648,6 +698,232 @@ fn set_birthday(app: tauri::AppHandle, month: u8, day: u8) -> Result<(), String>
 fn preview_voice(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.emit("settings:preview-voice", ());
     Ok(())
+}
+
+/* ---------- 自主走动开关 ---------- */
+
+/// 开关桌宠的**自主走动**并持久化。
+///
+/// 关闭后不在屏幕上位移，但待机、休息、点击互动、语音、
+/// 天气、关心语句全部照常 —— 语义比「暂停自主活动」精确得多。
+#[tauri::command]
+fn set_walk_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mut cfg = load_config();
+    cfg.walk_enabled = enabled;
+    save_config(&cfg);
+    log(&format!("set_walk_enabled = {enabled}"));
+    // 广播给主窗口：关闭时它需要立刻切回待机
+    let _ = app.emit("settings:walk-enabled", enabled);
+    Ok(())
+}
+
+/// 开关「智能避让」并持久化。
+///
+/// 开启后前端会轮询前台窗口：有其他程序在前台时靠边坐下，
+/// 回到桌面再站起来。默认关闭 —— 它会移动桌宠，
+/// 应当是用户显式开启的行为。
+#[tauri::command]
+fn set_smart_dodge(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mut cfg = load_config();
+    cfg.smart_dodge = enabled;
+    save_config(&cfg);
+    log(&format!("set_smart_dodge = {enabled}"));
+    let _ = app.emit("settings:smart-dodge", enabled);
+    Ok(())
+}
+
+/* ---------- 开机自启 ---------- */
+
+/// 注册表中自启项的键名。
+///
+/// **必须带 hive 前缀 `HKCU\`**：`reg.exe` 要求完整路径，
+/// 只写 `Software\...` 会报 `ERROR: Invalid key name`。
+/// （写注册表 API 时可以省略 hive，但命令行工具不行 ——
+/// 这里踩过一次，实测确认。）
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_NAME: &str = "Mon3trPet";
+
+/// 设置开机自启（写 HKCU 的 Run 键）。
+///
+/// ## 为什么用 HKCU\...\Run 而不是其他方案
+///
+/// | 方案 | 取舍 |
+/// |---|---|
+/// | **HKCU Run 键**（选用）| 无需管理员权限；用户可在「任务管理器 → 启动」里自行禁用；失败会明确报错 |
+/// | 启动文件夹快捷方式 | 需要创建 .lnk（依赖 COM 或额外 crate），本环境不好实现 |
+/// | 任务计划程序 | 功能最强（可延迟启动），但复杂度高得多，对桌宠是过度设计 |
+///
+/// 路径要**加引号**：安装目录可能含空格，不加引号会被系统按空格拆开。
+///
+/// 失败时返回 Err 而不是静默 —— 用户点了开关却没生效是最难排查的
+/// （README 第 15 条：6 个设置项曾因 ACL 静默失效）。
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let path = exe.to_string_lossy().to_string();
+
+    let mut cfg = load_config();
+    cfg.autostart = enabled;
+    save_config(&cfg);
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // 用 reg.exe 而非 windows crate：写注册表要引入 Win32_System_Registry
+        // feature 与一堆 unsafe，而 reg.exe 是系统自带、行为稳定。
+        let quoted = format!("\"{path}\"");
+        let result = if enabled {
+            Command::new("reg")
+                .args(["add", AUTOSTART_KEY, "/v", AUTOSTART_NAME,
+                       "/t", "REG_SZ", "/d", &quoted, "/f"])
+                .output()
+        } else {
+            Command::new("reg")
+                .args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"])
+                .output()
+        };
+
+        match result {
+            Ok(out) if out.status.success() => {
+                log(&format!("autostart = {enabled} ({quoted})"));
+                let _ = app.emit("settings:autostart", enabled);
+                Ok(())
+            }
+            Ok(out) => {
+                let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                // 关闭时若本来就没这一项，reg 会报「找不到」，属正常
+                if !enabled && msg.contains("unable to find") {
+                    let _ = app.emit("settings:autostart", false);
+                    return Ok(());
+                }
+                log(&format!("autostart 失败: {msg}"));
+                Err(format!("写入开机启动项失败：{msg}"))
+            }
+            Err(e) => {
+                log(&format!("autostart 调用 reg 失败: {e}"));
+                Err(format!("无法调用系统命令：{e}"))
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("仅支持 Windows".to_string())
+    }
+}
+
+/// 查询当前是否已设置开机自启（以**注册表实际状态**为准，不信配置）。
+///
+/// 用户可能通过任务管理器禁用了启动项，此时配置里仍是 true，
+/// 但实际已不自启 —— 界面要反映真实情况。
+#[tauri::command]
+fn get_autostart() -> bool {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        if let Ok(out) = Command::new("reg")
+            .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME])
+            .output()
+        {
+            return out.status.success();
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/* ---------- 智能避让：前台窗口检测 ---------- */
+
+/// 前台窗口信息，供「智能避让」判断是否该躲开。
+#[derive(serde::Serialize)]
+struct ForegroundInfo {
+    /// 前台窗口是否是「真正的应用程序」。
+    ///
+    /// 桌面、任务栏、以及我们自己的窗口**都不算** —— 回到桌面时
+    /// 桌宠应当站起来活动，否则它会永远躲在角落。
+    is_app: bool,
+    /// 前台窗口是否**最大化或全屏**（占据整个工作区）。
+    ///
+    /// 用户在全屏看视频/打游戏时，桌宠躲开更合适。
+    is_maximized: bool,
+}
+
+/// 检测当前前台窗口。
+///
+/// ## 为什么不能用 `window.is_focused()`
+///
+/// 桌宠窗口是 `skip_taskbar + always_on_top + decorations(false)` 的
+/// **永不聚焦**窗口：用户点它也不会持久获得焦点。因此「我们自己是否
+/// 聚焦」这个信号对本功能毫无意义，必须查**系统级**的前台窗口。
+///
+/// ## 必须排除的「伪前台」
+///
+/// 用户按下 Win+D 或点桌面时，前台窗口会变成桌面/任务栏窗口。
+/// 若不排除，会被误判成「有程序在前台」，桌宠就永远不站起来。
+///
+/// | 类名 | 是什么 |
+/// |---|---|
+/// | `Progman` | 程序管理器（桌面的宿主）|
+/// | `WorkerW` | 桌面图标层（Win10+ 常见）|
+/// | `Shell_TrayWnd` | 任务栏 |
+/// | `Shell_SecondaryTrayWnd` | 副屏任务栏 |
+/// | `Windows.UI.Core.CoreWindow` | Win10 开始菜单/搜索 |
+///
+/// ## 全屏判定的取舍
+///
+/// 用「前台窗口矩形 == 显示器工作区」而不是「== 整个屏幕」：
+/// 后者在任务栏可见时永远不成立，前者能正确识别最大化窗口。
+#[tauri::command]
+fn get_foreground_info() -> ForegroundInfo {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassNameW, GetForegroundWindow, IsZoomed,
+        };
+
+        unsafe {
+            let hwnd: HWND = GetForegroundWindow();
+            if hwnd.is_invalid() {
+                // 没有前台窗口（切换瞬间）-> 当作桌面，让桌宠活动
+                return ForegroundInfo { is_app: false, is_maximized: false };
+            }
+
+            // 类名
+            let mut buf = [0u16; 256];
+            let n = GetClassNameW(hwnd, &mut buf);
+            let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+
+            const SHELL_CLASSES: [&str; 6] = [
+                "Progman",
+                "WorkerW",
+                "Shell_TrayWnd",
+                "Shell_SecondaryTrayWnd",
+                "Windows.UI.Core.CoreWindow",
+                "SysShadow",
+            ];
+            // 也排除我们自己的窗口（类名由 Tauri 生成，含应用标识）
+            let is_shell = SHELL_CLASSES.iter().any(|c| class.eq_ignore_ascii_case(c));
+            let is_ours = class.contains("Mon3trPet") || class.contains("tauri");
+
+            // 最大化：IsZoomed 直接问系统，比比矩形可靠
+            let is_maximized = IsZoomed(hwnd).as_bool();
+
+            ForegroundInfo {
+                is_app: !is_shell && !is_ours,
+                is_maximized,
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        ForegroundInfo { is_app: false, is_maximized: false }
+    }
 }
 
 /* ---------- 所在地区（天气） ---------- */
@@ -1049,6 +1325,11 @@ pub fn run() {
             set_passthrough_enabled,
             set_birthday,
             preview_voice,
+            set_walk_enabled,
+            set_smart_dodge,
+            set_autostart,
+            get_autostart,
+            get_foreground_info,
             set_weather_cities,
             get_weather_cities,
             get_asset_base,

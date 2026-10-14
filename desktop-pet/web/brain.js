@@ -197,6 +197,32 @@ export class Brain {
     this.following = false;
 
     /**
+     * 是否允许**自主走动**（用户可关）。
+     *
+     * 关闭后 `decideNext` 不再选择 WALK，只在待机与休息间切换 ——
+     * 桌宠不会在屏幕上位移，但一切动画与互动照常。
+     *
+     * 与 `autonomyPaused` 的区别：那是「全部自主行为停摆」，
+     * 这个是「只停位移」，语义更精确、副作用更小。
+     */
+    this.walkEnabled = true;
+
+    /**
+     * 智能避让：有其他程序在前台时靠边坐下，回到桌面再站起来。
+     * 默认关闭 —— 它会移动用户摆放的桌宠，应当是用户显式开启的行为。
+     */
+    this.smartDodge = false;
+    /** 当前是否处于避让状态（避免重复进入/退出）。 */
+    this.dodging = false;
+    /**
+     * 用户是否**手动摆放**过位置。
+     *
+     * 由 main.js 在拖动结束后置位。避让时若为 true 则只坐下、
+     * 不挪动位置 —— 用户特意放的地方不该被程序挪走。
+     */
+    this.userPlaced = false;
+
+    /**
      * 提供光标位置的函数（返回 { inside, rel_x, rel_y } 或 null）。
      *
      * 跟随功能靠它拿方向；由 main.js 注入（原生侧 get_cursor_rel）。
@@ -414,8 +440,109 @@ export class Brain {
 
     if (canRest && r2 < BEHAVIOR.pRest) {
       this.enterRest(now);
-    } else {
-      this.enterWalk(now);
+      return;
+    }
+
+    // 用户关掉了行走 -> 改为继续待机
+    //
+    // 注意这**不是**让桌宠静止：仍进入 IDLE 状态，只是不再位移。
+    // 呼吸、眨眼等待机动画照常播放，观感是「待在原地活动」
+    // 而不是「卡住了」。
+    if (!this.walkEnabled) {
+      this.enterIdle(now);
+      return;
+    }
+
+    this.enterWalk(now);
+  }
+
+  /**
+   * 开关「自主行走」。
+   *
+   * ## 为什么需要它
+   *
+   * 用户反馈：桌宠在屏幕上走来走去有时干扰视线，而每次都要手动点
+   * 「坐下」或「暂停自主活动」很麻烦 —— 后者还会连带停掉待机动画
+   * 与关心语句，语义过重。
+   *
+   * 这个开关**只关掉位移**，其余行为保持：
+   *   - 待机、休息照常随机
+   *   - 点击互动、语音、天气、关心语句不受影响
+   *   - 跟随鼠标不受影响（那是用户显式指令）
+   *
+   * 关闭时若正在行走，立即切回待机，避免「卡在半路」。
+   */
+  setWalkEnabled(enabled, now = performance.now()) {
+    this.walkEnabled = !!enabled;
+    if (!this.walkEnabled && this.state === S.WALK) {
+      this.enterIdle(now);
+    }
+  }
+
+  /**
+   * 开关「智能避让」。
+   *
+   * 开启后由外部（main.js 的轮询）调用 `enterDodge` / `exitDodge`，
+   * 前者让桌宠靠边坐下，后者恢复活动。
+   */
+  setSmartDodge(enabled) {
+    this.smartDodge = !!enabled;
+    if (!this.smartDodge && this.dodging) {
+      this.exitDodge(performance.now());
+    }
+  }
+
+  /**
+   * 进入「避让」状态：移动到屏幕右下角并坐下。
+   *
+   * ## 为什么要靠边
+   *
+   * 用户在有程序工作时不想被桌宠挡住视线或干扰。把它挪到角落
+   * 既是"躲开"，也保持了可见性 —— 直接隐藏会显得程序挂了。
+   *
+   * ## 为什么只在用户没手动摆过位置时才移动
+   *
+   * 用户可能特意把桌宠拖到某个位置。若每次都强制挪走，
+   * 就成了"程序跟用户抢位置"，很烦人。因此只在用户**从未手动拖动**
+   * 过的情况下自动移动（`userPlaced` 由 main.js 在拖动后置位）。
+   */
+  enterDodge(now) {
+    if (!this.smartDodge || this.dodging) return;
+    const sc = this.getScreen();
+    if (!sc) return;
+
+    this.dodging = true;
+    this._stateBeforeDodge = this.state;
+
+    // 靠右下角，留一点边距
+    if (!this.userPlaced) {
+      const margin = 24;
+      const right = sc.work_x + sc.work_w - sc.win_w - margin;
+      const bottom = sc.work_y + sc.work_h - sc.win_h - margin;
+      const tx = Math.max(sc.work_x, right);
+      const ty = Math.max(sc.work_y, bottom);
+      // 只在位置确实不同时才移动，避免无谓的窗口指令
+      if (Math.abs(sc.win_x - tx) > 2 || Math.abs(sc.win_y - ty) > 2) {
+        this.onMove(tx, ty);
+      }
+    }
+
+    // 坐下（若已坐着就不必重复）
+    if (this.state !== S.SIT) {
+      this.enterSit(now);
+    }
+  }
+
+  /** 退出「避让」：恢复活动（站起来）。 */
+  exitDodge(now) {
+    if (!this.dodging) return;
+    this.dodging = false;
+    // 站起来：只有确实坐着才需要切状态
+    if (this.sitting) {
+      this.sitting = false;
+    }
+    if (this.state === S.SIT) {
+      this.enterIdle(now);
     }
   }
 

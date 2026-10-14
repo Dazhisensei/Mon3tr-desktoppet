@@ -14,6 +14,22 @@
 
 let invokeFn = null;
 
+/**
+ * 查询开机自启的**实际**状态（读注册表，不信配置）。
+ *
+ * 之所以要单独查：用户可能在「任务管理器 → 启动」里禁用了自启项，
+ * 此时配置文件里仍是 true，但实际不会再自启 —— 界面必须反映真实
+ * 情况，否则用户会以为已经开了。
+ */
+async function queryAutostart() {
+  try {
+    const v = await invokeFn('get_autostart');
+    return typeof v === 'boolean' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 地理编码：把用户输入的地名变成候选地点（由 main.js 注入）。 */
 let searchCityFn = async () => [];
 
@@ -259,8 +275,20 @@ function render() {
   if (!cfg) return;
   $('setTop').checked = !!cfg.always_on_top;
   $('setPassthrough').checked = !!cfg.click_through;
+  // 走动开关：配置里没有时按「允许」处理（老版本配置无此字段）
+  $('setWalk').checked = cfg.walk_enabled !== false;
+  $('setDodge').checked = !!cfg.smart_dodge;
   $('setVolume').value = cfg.volume;
   $('setVolumeVal').textContent = cfg.volume;
+
+  // 自启状态以**注册表实际值**为准，不直接信配置：
+  // 用户可能在「任务管理器 → 启动」里禁用了，此时配置仍是 true。
+  queryAutostart().then((on) => {
+    if (typeof on === 'boolean') {
+      $('setAutostart').checked = on;
+      cfg.autostart = on;
+    }
+  });
 
   // 尺寸：整数百分比滑条（20~100）
   const sc = Math.round((cfg.scale || 0.35) * 100);
@@ -332,6 +360,32 @@ function bind() {
   $('setPassthrough').addEventListener('change', async (e) => {
     cfg.click_through = e.target.checked;
     await invokeFn('set_passthrough_enabled', { enabled: cfg.click_through });
+  });
+
+  $('setWalk').addEventListener('change', async (e) => {
+    cfg.walk_enabled = e.target.checked;
+    // 失败要让用户知道（点了开关却没生效是最难排查的）
+    const r = await invokeFn('set_walk_enabled', { enabled: cfg.walk_enabled });
+    if (r === undefined) cityHint('设置未能保存，请重试', true);
+  });
+
+  $('setAutostart').addEventListener('change', async (e) => {
+    const want = e.target.checked;
+    // 先回写再调用：失败时要把开关**拨回去**，不能停在错误状态
+    cfg.autostart = want;
+    try {
+      await invokeFn('set_autostart', { enabled: want });
+    } catch (err) {
+      e.target.checked = !want;
+      cfg.autostart = !want;
+      console.warn('set_autostart 失败:', err);
+    }
+  });
+
+  $('setDodge').addEventListener('change', async (e) => {
+    cfg.smart_dodge = e.target.checked;
+    const r = await invokeFn('set_smart_dodge', { enabled: cfg.smart_dodge });
+    if (r === undefined) cityHint('设置未能保存，请重试', true);
   });
 
   /*
