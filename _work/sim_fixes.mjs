@@ -1941,6 +1941,63 @@ console.log('\n=== 25. 用户建议的四项功能 ===');
       /!this\.smartDodge && this\.dodging/.test(bSrc));
 }
 
+/* ---------- 26. issue #1 的三条反馈 ---------- */
+console.log('\n=== 26. issue #1 回归防护 ===');
+
+{
+  const mSrc = readFileSync(path.join(WEB,'main.js'),'utf8');
+  const buildPs1 = readFileSync(path.join(ROOT,'_work','build_release.ps1'),'utf8');
+
+  // 26.1 菜单「暂停自主活动」图标一直勾选
+  //
+  // 根因：showMenu() 直接 autonomyPaused = true，而 syncMenu() 读的就是
+  // 这个值 —— 每次打开菜单图标都是勾选，看起来「关不掉」。
+  // 修法：拆出 menuPaused / settingsPaused，用户意图只由 toggle-pause 改。
+  chk('showMenu 不再直接改 autonomyPaused',
+      !/pausedBeforeMenu = autonomyPaused;\s*autonomyPaused = true;/.test(mSrc));
+  chk('存在独立的 menuPaused', /let menuPaused = false/.test(mSrc));
+  chk('存在独立的 settingsPaused', /let settingsPaused = false/.test(mSrc));
+  chk('主循环同时检查三个暂停标志',
+      /!autonomyPaused && !menuPaused && !settingsPaused/.test(mSrc));
+  // 只统计**代码**中的赋值：排除声明（let ...）与注释里提到的旧写法
+  const codeLines = mSrc.split('\n').filter((l) => {
+    const t = l.trim();
+    return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('let ');
+  });
+  const assigns = codeLines.filter((l) => /autonomyPaused = /.test(l)).length;
+  chk('autonomyPaused 只由用户操作改写', assigns === 1,
+      `代码中赋值 ${assigns} 处（应为 1，即 toggle-pause 的取反）`);
+  chk('点击桌宠不再清除用户暂停',
+      !/清除可能存在的暂停[\s\S]{0,40}autonomyPaused = false/.test(mSrc));
+
+  // 26.2 设置里的穿透开关失效
+  //
+  // 根因：只改 passthroughWanted，真正生效要等轮询；而面板打开期间
+  // 轮询里有 settingsOpen() 的提前 return -> 开关看起来完全没反应。
+  chk('穿透开关改动后立即下发（不等轮询）',
+      /settings:passthrough'[\s\S]{0,700}await applyClickThrough/.test(mSrc));
+  chk('关闭设置面板后立刻刷新穿透状态',
+      /passthroughSuspended = false;[\s\S]{0,500}pollPassthrough\(\)/.test(mSrc));
+
+  // 26.3 发布包混入测试数据
+  //
+  // 根因：Compress-Archive -Path (Join-Path $OUT '*') 把 pet-config.json
+  // （含作者的测试生日/城市）、pet.log 一起打进了 ZIP。
+  // 只检查**实际执行**的打包命令，注释里提到的旧写法不算
+  const ps1Code = buildPs1.split('\n')
+    .filter((l) => !l.trim().startsWith('#'))
+    .join('\n');
+  chk('打包改为白名单（不再用 * 通配）',
+      /Compress-Archive -Path \$items/.test(ps1Code),
+      '使用 $items 白名单');
+  chk('白名单只含该分发的条目',
+      /@\('Mon3trPet\.exe', 'assets', 'audio', '使用说明\.md'\)/.test(buildPs1));
+  chk('打包前清理 pet-config.json / pet.log / webview-data',
+      /'pet-config\.json', 'pet\.log', 'webview-data'/.test(buildPs1));
+  chk('打包后自检不含运行时文件',
+      /ZIP 中混入了运行时文件/.test(buildPs1));
+}
+
 /* ---------- 汇总 ---------- */
 console.log('\n=== 汇总 ===');
 // 语法检查失败直接计入失败数：前端一行都跑不起来是最严重的问题

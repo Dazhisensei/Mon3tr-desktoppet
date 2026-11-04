@@ -458,12 +458,16 @@ function tickLoop(now) {
   // （move_window 是异步的，取回的可能是上一帧的位置 → 原地踏步）。
   walkingNow = brain?.state === 'walk' || brain?.state === 'follow';
 
-  // 行为推进。用户主动暂停时跳过，其余情况一律推进
+  // 行为推进。用户主动暂停（或菜单开着）时跳过，其余情况一律推进
   // （包括手动选动作后——否则选「行走」窗口不会移动，表现为原地踏步）
   //
-  // 跟随是用户显式开启的操作，**不受「暂停自主活动」影响**：
+  // 跟随是用户显式开启的操作，**不受暂停影响**：
   // 那个开关针对的是「桌宠自己乱走」，而不是用户的跟随指令。
-  if (!autonomyPaused || brain?.state === 'follow') {
+  //
+  // menuPaused / settingsPaused 与 autonomyPaused 分开：
+  // 前两者是菜单/面板开合的临时状态，后者才是用户的意图
+  // （菜单图标只反映后者）。
+  if ((!autonomyPaused && !menuPaused && !settingsPaused) || brain?.state === 'follow') {
     brain?.tick(now, dt);
   }
   walkingNow = brain?.state === 'walk' || brain?.state === 'follow';
@@ -1005,8 +1009,13 @@ async function playClick() {
   // 用户交互：推迟休息（不影响关心的冷却）
   markUserActivity();
 
-  // 清除可能存在的暂停，确保播完能自动恢复
-  autonomyPaused = false;
+  // 只清除**临时**暂停（菜单/面板带来的）。
+  //
+  // 不能动 autonomyPaused：那是用户的显式设置。早期这里直接把它置 false，
+  // 结果是「用户暂停了自主活动，点一下桌宠就悄悄恢复了」——
+  // 图标与实际状态随后也不一致（issue #1 的同类问题）。
+  menuPaused = false;
+  settingsPaused = false;
 
   // 「戳一下」语音：与动画时长不做任何对齐——
   // 语音比动画长或短都保留原样，不裁剪也不等待。
@@ -1052,6 +1061,36 @@ function toast(msg, ms = 1800) {
 const menu = document.getElementById('menu');
 let menuOpen = false;
 
+/**
+ * 菜单打开期间的临时暂停（**与用户意图无关**）。
+ *
+ * ## 为什么要与 autonomyPaused 分开
+ *
+ * 早期实现里 `showMenu()` 直接 `autonomyPaused = true`，关闭菜单时再恢复。
+ * 但 `syncMenu()` 读的是 `autonomyPaused`，于是：
+ *
+ *   只要打开菜单 → 值被强制置 true → 图标显示「已勾选」
+ *
+ * 用户点了「恢复」之后，下次再打开菜单，**图标又是勾选的** ——
+ * 看起来就是「打了一次勾就再也关不掉」。issue #1 报的正是这个。
+ *
+ * 现在拆成两个变量：
+ *   - `autonomyPaused`   ：用户显式设置的暂停（菜单图标只反映它）
+ *   - `menuPaused`       ：菜单打开期间的临时暂停
+ *
+ * 行为推进时看两者之一：`if (!autonomyPaused && !menuPaused)`。
+ */
+let menuPaused = false;
+
+/**
+ * 设置面板打开期间的临时暂停。
+ *
+ * 与 `menuPaused` 同理：面板打开时不该让桌宠乱走（会盖住面板），
+ * 但这**不是用户意图**，不能写进 `autonomyPaused`
+ * —— 否则菜单里「暂停自主活动」的图标会被面板开合污染。
+ */
+let settingsPaused = false;
+
 /** 打开菜单前是否处于暂停状态，关闭时恢复 */
 let pausedBeforeMenu = false;
 
@@ -1061,11 +1100,14 @@ function showMenu(x, y) {
 
   // 暂停自主行为：菜单期间桌宠不再移动，避免菜单「跟着跑」。
   //
-  // 但**不要强制切待机**——那会让坐着的桌宠一开菜单就站起来，
+  // 用**独立的 menuPaused**，绝不动 autonomyPaused ——
+  // 否则菜单图标会跟着菜单的开合乱跳（issue #1）。
+  //
+  // 也**不要强制切待机**：那会让坐着的桌宠一开菜单就站起来，
   // 关掉菜单才坐回去（用户实测反馈的问题）。
   // 坐与跟随都是用户显式开启的持续状态，菜单不该打断它们。
   pausedBeforeMenu = autonomyPaused;
-  autonomyPaused = true;
+  menuPaused = true;
 
   const persistent = brain?.sitting || brain?.following;
   if (!persistent) {
@@ -1089,12 +1131,12 @@ function showMenu(x, y) {
 function hideMenu() {
   menu.style.display = 'none';
   menuOpen = false;
+  // 只解除**菜单带来的**暂停，用户自己的暂停状态原样保留
+  menuPaused = false;
 
-  // 恢复打开菜单前的状态（若用户原本就暂停着，则保持暂停）
-  if (!pausedBeforeMenu) {
-    autonomyPaused = false;
-    // 坐/跟随时不要动状态：保持在原状态即可，
-    // 只有常规情况下才重新进入待机
+  // 若用户原本没暂停，回到待机
+  if (!pausedBeforeMenu && !autonomyPaused) {
+    // 坐/跟随时不要动状态
     if (!brain.sitting && !brain.following) {
       brain.enterIdle(performance.now());
     }
@@ -1288,7 +1330,10 @@ async function runMenuCommand(cmd) {
     }
 
     case 'random':
-      autonomyPaused = false;
+      // 「随机行为一次」是显式指令，应立即生效 —— 临时解除暂停即可。
+      // **不动 autonomyPaused**：用户的暂停设置要保留（issue #1 同类问题）。
+      menuPaused = false;
+      settingsPaused = false;
       brain.enterIdle(performance.now());
       brain.until = performance.now();
       break;
@@ -1302,7 +1347,10 @@ async function runMenuCommand(cmd) {
       break;
 
     case 'toggle-pause':
+      // 只切换**用户意图**。菜单开合带来的临时暂停由 menuPaused 承担，
+      // 因此这里的值不会被「打开菜单」污染（issue #1）。
       autonomyPaused = !autonomyPaused;
+      syncMenu();   // 立即反映到图标（菜单马上会被 hideMenu 关闭，但保持一致性）
       if (autonomyPaused) {
         brain.state = 'idle';
         await setAction('idle', { force: true });
@@ -1339,7 +1387,13 @@ async function runMenuCommand(cmd) {
     case 'act:click': {
       // 手动选动作：直接进入对应行为状态，而不冻结状态机
       // （冻结 tick 会导致选「行走」时窗口不移动，即原地踏步）
-      autonomyPaused = false;
+      //
+      // 只解除**临时**暂停，保留用户的 autonomyPaused 设置。
+      // 注意：若用户处于「暂停自主活动」，选「行走」后由于主循环
+      // 不推进，窗口不会移动 —— 这是符合语义的（暂停就是不走），
+      // 此时应引导用户看菜单里的勾选状态，而不是偷偷替他恢复。
+      menuPaused = false;
+      settingsPaused = false;
       const now = performance.now();
       const hold = 8000;
       const key = cmd.slice(4); // 去掉 "act:"
@@ -1413,12 +1467,32 @@ async function listenSettingChanges() {
   };
 
   // 点击穿透开关（设置窗口改动后同步）
+  //
+  // ## 为什么这里要**立即下发**而不等轮询
+  //
+  // 早期只改 `passthroughWanted` 就返回，真正生效要等 pollPassthrough
+  // 下一轮（60ms）。但设置面板打开期间轮询里有一条 `settingsOpen()`
+  // 提前 return 的分支 —— 于是用户拨动开关后**什么都不会发生**，
+  // 直到关掉面板。给人的感觉就是「开关失效」（issue #1）。
+  //
+  // 现在直接下发一次，让效果立刻可见。
   await safe('settings:passthrough', async (e) => {
     passthroughWanted = e.payload !== false;
-    if (!passthroughWanted && passthroughNow) {
-      passthroughNow = false;
-      // 用统一的封装，失败会被统计并提示（早期直接 invoke 会静默）
-      await applyClickThrough(false);
+    if (!passthroughWanted) {
+      // 关掉穿透：立即恢复可交互
+      if (passthroughNow) {
+        passthroughNow = false;
+        await applyClickThrough(false);
+      }
+    } else {
+      // 打开穿透：立刻按「光标是否在角色上」下发一次，
+      // 让用户当场就能验证开关是否生效
+      const info = await invoke('get_cursor_rel');
+      const pass = !info || !info.inside
+        ? true
+        : !isOpaqueAt(info.rel_x, info.rel_y);
+      passthroughNow = pass;
+      await applyClickThrough(pass);
     }
   });
 
@@ -1609,24 +1683,26 @@ async function listenSettingChanges() {
         // 面板打开时保持窗口可交互（不能穿透），并暂停自主行为
         if (open) {
           passthroughSuspended = true;
-          pausedBeforeMenu = autonomyPaused;
-          autonomyPaused = true;
+          // 与菜单同理：用**独立标志**暂停行为，不动用户意图的
+          // autonomyPaused —— 否则菜单图标会被设置面板的开合污染，
+          // 表现为「打了一次勾就再也关不掉」（issue #1）。
+          settingsPaused = true;
           if (passthroughNow) {
             passthroughNow = false;
             applyClickThrough(false);
           }
         } else {
           passthroughSuspended = false;
-          if (!pausedBeforeMenu) {
-            autonomyPaused = false;
-            brain?.enterIdle(performance.now());
-          }
+          settingsPaused = false;
           // 面板关闭时 Rust 会按最新缩放重设窗口尺寸。
           // 事件（settings:scale）通常已经处理过，但这里再自愈一次，
           // 确保画布尺寸与窗口一致 —— 否则画布偏大会被裁掉顶部（角色头没了）。
           syncScaleFromWindow();
           fitStage();
           refreshScreen(true);
+          // 面板关闭后立刻刷新一次穿透状态：
+          // 面板打开期间轮询是提前 return 的，期间改过开关不会生效。
+          pollPassthrough().catch(() => {});
         }
       },
     });

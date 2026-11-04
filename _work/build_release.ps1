@@ -71,8 +71,45 @@ Copy-Item (Join-Path $TAURI 'src-tauri\target\release\desktop-pet.exe') `
 $readme = Join-Path $ROOT 'dist\使用说明.md'
 if (Test-Path $readme) { Copy-Item $readme (Join-Path $OUT '使用说明.md') -Force }
 
+# ---- 打包前清理运行时产物 ----
+#
+# 早期这里用 `Compress-Archive -Path (Join-Path $OUT '*')` 打包全部内容，
+# 结果把**本地运行产生的文件**也打进去了：
+#
+#   pet-config.json  -> 含作者的测试生日、测试天气城市（issue #1 指出）
+#   pet.log          -> 运行日志
+#   webview-data\    -> WebView2 缓存，几十 MB
+#
+# 现在改为**白名单**：只打包明确该分发的东西。
+# 白名单比黑名单安全 —— 将来新增运行时文件也不会意外混进来。
+$items = @('Mon3trPet.exe', 'assets', 'audio', '使用说明.md') |
+  ForEach-Object { Join-Path $OUT $_ } |
+  Where-Object { Test-Path $_ }
+
+# 保险：先物理删除已知的运行时产物，避免它们被目录整体带上
+foreach ($junk in @('pet-config.json', 'pet.log', 'webview-data')) {
+  $p = Join-Path $OUT $junk
+  if (Test-Path $p) {
+    Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "  已清理运行时产物: $junk"
+  }
+}
+
 if (Test-Path $ZIP) { Remove-Item $ZIP -Force }
-Compress-Archive -Path (Join-Path $OUT '*') -DestinationPath $ZIP -CompressionLevel Optimal
+Compress-Archive -Path $items -DestinationPath $ZIP -CompressionLevel Optimal
+
+# 打包后自检：确认没有把运行时文件打进去
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$arc = [System.IO.Compression.ZipFile]::OpenRead($ZIP)
+$bad = $arc.Entries | Where-Object {
+  $_.FullName -eq 'pet-config.json' -or $_.FullName -eq 'pet.log' -or
+  $_.FullName -like 'webview-data/*'
+}
+$arc.Dispose()
+if ($bad) {
+  throw "ZIP 中混入了运行时文件: $(($bad | ForEach-Object { $_.FullName }) -join ', ')"
+}
+Write-Host '  自检通过：ZIP 不含 pet-config.json / pet.log / webview-data'
 
 $exeMB    = (Get-Item (Join-Path $OUT 'Mon3trPet.exe')).Length / 1MB
 $assetsMB = (Get-ChildItem (Join-Path $OUT 'assets') -Recurse -File |
