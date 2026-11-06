@@ -199,3 +199,25 @@ vendored 模式下必需的 `.cargo-checksum.json`（registry 的解压目录里
 
 > 每拉取过新依赖后都要重跑一次 `make_checksums.py`，
 > 否则新 crate 缺校验文件会导致离线构建失败。
+
+## 替换已发布版本（不升版本号）
+
+修的是「本该生效却没生效」的 bug 时，升版本号会让用户以为要重新下载整个新版本；
+也可以**原地替换**同一版本的安装包。流程：
+
+1. 改代码 → 测试 → 重新编译
+2. 用**同名** zip 重新打包（白名单、不含 `pet-config.json` / `pet.log` / `webview-data`）
+3. 提交并推送 `main`
+4. 把标签挪到新提交并强推：`git tag -f v0.1.3 <commit>` + `git push -f origin refs/tags/v0.1.3`
+   （旧提交仍在历史里，可随时重建旧包）
+5. 替换 GitHub Release 的资产：先
+   `DELETE /repos/{owner}/{repo}/releases/assets/{id}`，再
+   `POST https://uploads.github.com/.../releases/{id}/assets?name=<同名>`；
+   同一版本不能存同名两份资产，必须先删
+6. 更新 Release 正文（顶部写明「已替换、请重新下载」）并 `make_latest: "true"`
+
+> 注意：替换资产会把该资产的 `download_count` 归零；
+> 正文里要明确写「版本号不变，但安装包已更新」，否则用户无法分辨。
+
+发布全程只用 git 凭据（Windows 凭据管理器）里的 token，
+不需要额外安装 `gh`：`git credential fill` 取到后直接调 REST API。
