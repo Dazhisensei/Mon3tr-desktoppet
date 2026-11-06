@@ -169,6 +169,30 @@ async function resolveAssetBase() {
 
 const frameCache = new Map();
 
+/**
+ * 素材是否与页面**跨源**。
+ *
+ * ## 为什么这决定了穿透能不能用
+ *
+ * 打包版的素材外置在 exe 同目录，前端通过 `http://petasset.localhost/`
+ * 读取；而页面自身是 `http://tauri.localhost`。**host 不同 = 跨源**。
+ *
+ * 跨源的 `<img>` 若没声明 CORS，`drawImage` 会**污染**画布：
+ * 之后任何 `getImageData` 都抛 `SecurityError`。
+ * 而点击穿透完全依赖「采样光标处像素的 alpha」，采样一抛异常，
+ * `isOpaqueAt` 只能保守返回「不透明」→ 穿透永远打不开
+ * （0.1.3 现场复现：`getImageData` 抛 SecurityError，
+ * 窗口扩展样式始终没有 WS_EX_TRANSPARENT，透明区域照样吃点击）。
+ *
+ * 声明 `crossOrigin = 'anonymous'` 后，Rust 侧 `http_response` 已经返回的
+ * `Access-Control-Allow-Origin: *` 才会被校验通过，画布保持干净。
+ *
+ * 开发时 `assetBase` 为空（走相对路径，同源），无需也不应声明 CORS。
+ */
+function isCrossOriginAsset() {
+  return /^https?:\/\//i.test(assetBase || '');
+}
+
 async function loadFrames(actionKey) {
   if (frameCache.has(actionKey)) {
     return frameCache.get(actionKey);
@@ -181,12 +205,36 @@ async function loadFrames(actionKey) {
   const imgs = [];
   for (let i = 1; i <= act.frameCount; i++) {
     const n = String(i).padStart(4, '0');
+    const url = `${base}f${n}.${ext}`;
     const img = new Image();
-    img.src = `${base}f${n}.${ext}`;
+
+    // 跨源素材必须声明 CORS，否则画布会被污染（详见 isCrossOriginAsset）。
+    if (isCrossOriginAsset()) img.crossOrigin = 'anonymous';
+    img.src = url;
+
+    let ok = false;
     try {
       await img.decode();
+      ok = img.naturalWidth > 0;
     } catch {
-      /* 单帧失败不阻断 */
+      ok = false;   /* 单帧失败不阻断 */
+    }
+
+    if (!ok && img.crossOrigin) {
+      // 声明 CORS 后反而加载失败（服务端没给头、或协议没透传）：
+      // 退回普通加载，至少角色还能显示。
+      // 代价是画布被污染、穿透采样失败 —— isOpaqueAt 会记录 probeTaint，
+      // 不再像 0.1.3 那样「默默失效」。
+      passStats.corsFallback++;
+      const plain = new Image();
+      plain.src = url;
+      try {
+        await plain.decode();
+      } catch {
+        /* 单帧失败不阻断 */
+      }
+      imgs.push(plain);
+      continue;
     }
     imgs.push(img);
   }
@@ -583,6 +631,18 @@ const passStats = {
   lastOpaque: null,  // 最近一次「是否落在角色上」
   lastShouldPass: null,
   lastError: '',     // 最近一次错误信息
+  /**
+   * 采样画布是否被跨源素材污染。
+   *
+   * 为 true 时 alpha 采样**必然**抛 SecurityError，穿透不可能生效
+   * （这正是 0.1.3 的故障根因）。留这个标志是为了让同类问题一眼可见，
+   * 而不是又变成「开关拨了没反应、日志里什么都没有」。
+   */
+  probeTaint: false,
+  /** 退回普通（无 CORS）加载的帧数；大于 0 说明穿透会因污染而失效 */
+  corsFallback: 0,
+  /** 因「点到的像素是透明的」而被丢弃的点击次数（轮询慢一拍的兜底） */
+  clickIgnored: 0,
 };
 window.__passthrough = passStats;
 
@@ -592,6 +652,9 @@ const probeCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
 
 /** alpha 低于该值即视为「透明」，可以穿透。留一点余量避开软边。 */
 const ALPHA_THRESHOLD = 12;
+
+/** 污染告警只打一次，避免 60ms 轮询把控制台刷爆。 */
+let probeTaintWarned = false;
 
 /** 上次同步的帧标识，避免重复绘制同一帧（60ms 轮询下省下大量无谓开销） */
 let probeKey = '';
@@ -685,9 +748,38 @@ function isOpaqueAt(relX, relY) {
       if (data[i] > maxA) maxA = data[i];
     }
     return maxA > ALPHA_THRESHOLD;
-  } catch {
-    return true;   // 读取失败时保守处理
+  } catch (e) {
+    // 画布被跨源素材污染时 `getImageData` 会抛 SecurityError。
+    // 此时毫无采样能力，只能保守按「不透明」处理，
+    // 否则一旦穿透，角色就再也点不到了。
+    //
+    // **但不能静默**：0.1.3 就是栽在这里 —— 穿透从头到尾没生效过，
+    // 而控制台一个字都没有。现在记录下来并只告警一次。
+    passStats.probeTaint = true;
+    passStats.lastError = `${e?.name || 'Error'}: ${e?.message || e}`;
+    if (!probeTaintWarned) {
+      probeTaintWarned = true;
+      console.error(
+        '点击穿透采样失败（画布被跨源素材污染？）—— 透明区域将不会穿透。' +
+        '检查素材是否以 crossOrigin 加载：', e
+      );
+    }
+    return true;
   }
+}
+
+/**
+ * 视口坐标（`e.clientX/Y`）处是否落在角色（不透明像素）上。
+ *
+ * 供「点击/右键的兜底判定」使用：穿透靠 60ms 轮询跟随光标，鼠标刚移进
+ * 透明区、还没等到下一拍就按下时，这次点击仍会漏进 canvas。这里用**同一套**
+ * 采样逻辑再同步判一次，透明就当作点在桌面上。
+ */
+function isOpaqueAtClient(clientX, clientY) {
+  syncProbeCanvas();
+  const winW = window.innerWidth || 1;
+  const winH = window.innerHeight || 1;
+  return isOpaqueAt(clientX / winW, clientY / winH);
 }
 
 /**
@@ -743,10 +835,7 @@ async function pollPassthrough() {
   }
 
   if (!passthroughWanted || passthroughSuspended) {
-    if (passthroughNow) {
-      passthroughNow = false;
-      applyClickThrough(false);
-    }
+    if (passthroughNow) applyClickThrough(false);
     return;
   }
 
@@ -757,10 +846,7 @@ async function pollPassthrough() {
   // 跟随鼠标期间**也不穿透**：窗口正朝光标移动，若此刻穿透，
   // 光标会落到桌面上，跟随的输入源就断了。
   if (dragging || menuOpen || settingsOpen() || isBubbleVisible() || brain?.following) {
-    if (passthroughNow) {
-      passthroughNow = false;
-      applyClickThrough(false);
-    }
+    if (passthroughNow) applyClickThrough(false);
     return;
   }
 
@@ -794,10 +880,7 @@ async function pollPassthrough() {
   }
   passStats.lastShouldPass = shouldPass;
 
-  if (shouldPass !== passthroughNow) {
-    passthroughNow = shouldPass;
-    applyClickThrough(shouldPass);
-  }
+  if (shouldPass !== passthroughNow) applyClickThrough(shouldPass);
 }
 
 /**
@@ -805,23 +888,39 @@ async function pollPassthrough() {
  *
  * 抽成函数的原因：调用点有三处（用户关闭穿透、面板打开、状态变化），
  * 早期三处各自 `invoke(...)` 且**都不检查结果**，失败时完全静默。
- * 现在统一在这里 await 并统计，连续失败会提示用户。
+ * 现在统一在这里 await 并统计，失败会提示用户。
+ *
+ * ## passthroughNow 只在这里改（且只在成功后改）
+ *
+ * 早期调用方是「先改状态，再下发」，一旦下发失败状态就永远错位：
+ * 标记说「已穿透」，实际没有，于是再也不会重试。
+ * 现在由本函数在成功时写入，失败则保持原值，由下一轮轮询重试。
  */
 let passFailNotified = false;
 
+/** 失败后的退避截止时间，避免 60ms 轮询把失败调用/提示刷爆。 */
+let passRetryAt = 0;
+
 async function applyClickThrough(enabled) {
+  if (passRetryAt && performance.now() < passRetryAt) return false;
+
   const r = await invoke('set_click_through', { enabled });
   // invoke 失败时返回 undefined；成功时该命令返回 null（Rust 侧 Ok(())）
   if (r === undefined && window.__TAURI__) {
     passStats.setFail++;
-    if (!passFailNotified && passStats.setFail >= 3) {
+    passStats.lastError = 'set_click_through 调用失败';
+    passRetryAt = performance.now() + 3000;
+    if (!passFailNotified) {
       passFailNotified = true;
       // 不能用 toast 遮挡太久；给一次明确提示即可
       toast('点击穿透功能不可用（详见 console 日志）', 4000);
     }
-    return;
+    return false;
   }
+  passRetryAt = 0;
   passStats.setOk++;
+  passthroughNow = enabled;
+  return true;
 }
 
 /** 启动穿透轮询（约 60ms 一次，足够跟手且开销很低）。 */
@@ -970,6 +1069,25 @@ let dragging = false;
  */
 canvas.addEventListener('mousedown', async (e) => {
   if (e.button !== 0) return;
+
+  // 兜底：开启了点击穿透时，点在**透明像素**上就该当作点在桌面上，
+  // 整颗忽略这次点击 —— 不进入拖拽，也就不会播「戳一下」。
+  //
+  // 正常路径下这种点击根本到不了 canvas（窗口已经穿透）。但穿透靠 60ms
+  // 轮询跟随光标：鼠标刚移进透明区、还没等到下一拍就按下去时，
+  // 这次点击会漏进 canvas → 拖拽 + 点击动画。用户看到的就是
+  // 「点透明区域也戳了一下」。
+  //
+  // 菜单/面板/气泡是 DOM 元素，不参与 alpha 采样，因此排除在外。
+  if (
+    passthroughWanted && !passthroughSuspended && !brain?.following &&
+    !menuOpen && !settingsOpen() && !isBubbleVisible() &&
+    !isOpaqueAtClient(e.clientX, e.clientY)
+  ) {
+    passStats.clickIgnored++;
+    return;
+  }
+
   dragging = true;
   brain?.holdUser();
   markUserActivity();
@@ -1176,6 +1294,16 @@ function syncMenu() {
 
 window.addEventListener('contextmenu', (e) => {
   e.preventDefault();
+  // 与左键同理：开了穿透后，右击透明区域应当落到桌面，
+  // 不该弹出桌宠菜单（轮询慢一拍时同样需要这条兜底）。
+  if (
+    passthroughWanted && !passthroughSuspended && !brain?.following &&
+    !menuOpen && !settingsOpen() && !isBubbleVisible() &&
+    e.target === canvas && !isOpaqueAtClient(e.clientX, e.clientY)
+  ) {
+    passStats.clickIgnored++;
+    return;
+  }
   showMenu(e.clientX, e.clientY);
 });
 
@@ -1480,18 +1608,16 @@ async function listenSettingChanges() {
     passthroughWanted = e.payload !== false;
     if (!passthroughWanted) {
       // 关掉穿透：立即恢复可交互
-      if (passthroughNow) {
-        passthroughNow = false;
-        await applyClickThrough(false);
-      }
+      if (passthroughNow) await applyClickThrough(false);
     } else {
       // 打开穿透：立刻按「光标是否在角色上」下发一次，
       // 让用户当场就能验证开关是否生效
       const info = await invoke('get_cursor_rel');
+      // 采样画布必须先跟上当前帧，否则判的是上一帧的像素（错位）
+      syncProbeCanvas();
       const pass = !info || !info.inside
         ? true
         : !isOpaqueAt(info.rel_x, info.rel_y);
-      passthroughNow = pass;
       await applyClickThrough(pass);
     }
   });
@@ -1687,10 +1813,7 @@ async function listenSettingChanges() {
           // autonomyPaused —— 否则菜单图标会被设置面板的开合污染，
           // 表现为「打了一次勾就再也关不掉」（issue #1）。
           settingsPaused = true;
-          if (passthroughNow) {
-            passthroughNow = false;
-            applyClickThrough(false);
-          }
+          if (passthroughNow) applyClickThrough(false);
         } else {
           passthroughSuspended = false;
           settingsPaused = false;

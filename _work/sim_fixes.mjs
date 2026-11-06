@@ -52,6 +52,8 @@ const audioManifest = JSON.parse(readFileSync(path.join(WEB,'audio','audio.json'
 const errors = [], warnings = [], invokes = [];
 const listeners = new Map();
 let ALPHA = 0;
+/** 置 true 模拟「画布被跨源素材污染」：getImageData 抛 SecurityError */
+let TAINT = false;
 let CURSOR = { rel_x: 0.5, rel_y: 0.5, inside: true };
 
 /* ---------- DOM 桩 ---------- */
@@ -62,6 +64,13 @@ const makeCanvas = () => ({
     // paintFrame 会用到变换（坐姿缩放补偿）
     save(){}, restore(){}, translate(){}, scale(){},
     getImageData(x,y,w,h){
+      // 真实环境里跨源素材会污染画布，调用直接抛 SecurityError。
+      // 这里用开关模拟，用于验证「采样失败」的处理路径。
+      if (TAINT) {
+        const e = new Error('The canvas has been tainted by cross-origin data.');
+        e.name = 'SecurityError';
+        throw e;
+      }
       const n = Math.max(1,w*h)*4; const d = new Uint8ClampedArray(n);
       for (let i=3;i<n;i+=4) d[i]=ALPHA;
       return { data:d };
@@ -1996,6 +2005,117 @@ console.log('\n=== 26. issue #1 回归防护 ===');
       /'pet-config\.json', 'pet\.log', 'webview-data'/.test(buildPs1));
   chk('打包后自检不含运行时文件',
       /ZIP 中混入了运行时文件/.test(buildPs1));
+}
+
+/* ---------- 27. 点击穿透「透明区域仍被吃掉点击」----------
+ *
+ * 现场症状（0.1.3 打包版）：点角色周围的透明区域，照样触发拖拽 + 点击动画。
+ *
+ * 根因链：
+ *   1. 打包版素材走 `http://petasset.localhost`，页面是 `http://tauri.localhost`
+ *      —— 跨源；
+ *   2. `<img>` 没声明 crossOrigin，drawImage 污染画布；
+ *   3. isOpaqueAt 的 getImageData 抛 SecurityError，catch 里保守返回「不透明」；
+ *   4. 于是永远判「点在角色上」，穿透一次都没开过。
+ *
+ * 除了跨源声明，还补了「点击兜底」：穿透靠 60ms 轮询，鼠标刚进透明区就
+ * 按下时可能还差一拍，这一拍里的点击必须按桌面处理。
+ */
+console.log('\n=== 27. 穿透：跨源污染与点击兜底 ===');
+
+{
+  const mSrc = readFileSync(path.join(WEB,'main.js'),'utf8');
+
+  // 27.1 源码层防护
+  chk('跨源素材声明 crossOrigin（否则画布污染 → 采样抛错）',
+      /if \(isCrossOriginAsset\(\)\) img\.crossOrigin = 'anonymous'/.test(mSrc));
+  chk('CORS 声明失败时退回普通加载（至少角色可见）',
+      /passStats\.corsFallback\+\+/.test(mSrc));
+  chk('采样异常不再静默（记录 probeTaint 并告警一次）',
+      /passStats\.probeTaint = true/.test(mSrc) && /probeTaintWarned/.test(mSrc));
+  chk('passthroughNow 只由 applyClickThrough 在成功后写入',
+      /passthroughNow = enabled;/.test(mSrc) &&
+      (mSrc.match(/passthroughNow = /g) || []).length === 2,
+      `赋值 ${(mSrc.match(/passthroughNow = /g) || []).length} 处（声明 + applyClickThrough）`);
+  chk('点透明像素时丢弃这次点击（兜底拖拽/右键菜单）',
+      /if \(\s*\n\s*passthroughWanted && !passthroughSuspended &&[\s\S]{0,220}!isOpaqueAtClient\(e\.clientX, e\.clientY\)/.test(mSrc) &&
+      /contextmenu[\s\S]{0,400}!isOpaqueAtClient\(e\.clientX, e\.clientY\)/.test(mSrc));
+
+  // 27.1b 位置存取的单位一致性
+  //
+  // outer_position() 是物理像素，而建窗的 position() 收逻辑像素。
+  // 直接互相套用会让 125%/150% 缩放下「每次重启移动 1.25/1.5 倍」，
+  // 最终窗口跑到屏幕外（桌宠消失）。实测现场确实出现过。
+  const rs = readFileSync(path.join(WEB, '..', 'src-tauri', 'src', 'lib.rs'), 'utf8');
+  chk('保存位置换算成逻辑像素',
+      /cfg\.x = \(pos\.x as f64 \/ sf\)\.round\(\) as i32/.test(rs));
+  chk('Moved 事件保存时同样换算',
+      /cfg\.y = \(pos\.y as f64 \/ sf\)\.round\(\) as i32/.test(rs));
+  chk('启动时把越界位置夹回工作区（旧配置是物理坐标）',
+      /fn clamp_into_work_area/.test(rs) && /clamp_into_work_area\(&win\)/.test(rs));
+
+  // 27.2 运行时：采样失败时必须回到「不穿透」，且记录原因
+  (globalThis.__V.hideBubble || (() => {}))();
+  fireWin('mousedown', { target: canvas });   // 关掉可能开着的菜单
+  await sleep(50);
+
+  TAINT = false;
+  ALPHA = 0; CURSOR = { rel_x: 0.1, rel_y: 0.1, inside: true };
+  invokes.length = 0;
+  await pollPassthrough();
+  await sleep(20);
+  const pT1 = lastInvoke('set_click_through');
+  chk('透明处正常开启穿透（前置条件）',
+      pT1 && pT1[1].enabled === true,
+      pT1 ? `enabled=${pT1[1].enabled}` : '未调用');
+
+  TAINT = true;
+  invokes.length = 0;
+  W.__passthrough.probeTaint = false;
+  // 这条 console.error 是**预期内**的告警：临时截获并断言，避免污染汇总
+  const realErr = console.error;
+  const errLog = [];
+  console.error = (...a) => errLog.push(a.join(' '));
+  try {
+    await pollPassthrough();
+    await sleep(20);
+  } finally {
+    console.error = realErr;
+  }
+  const pT2 = lastInvoke('set_click_through');
+  chk('采样抛错 -> 保守回到不穿透（否则角色再也点不到）',
+      pT2 && pT2[1].enabled === false,
+      pT2 ? `enabled=${pT2[1].enabled}` : '未调用');
+  chk('采样抛错被记录（probeTaint）', W.__passthrough.probeTaint === true);
+  chk('采样抛错打出可读告警（不再静默）',
+      errLog.some(t => t.includes('画布被跨源素材污染')),
+      `告警 ${errLog.length} 条`);
+  TAINT = false;
+
+  // 27.3 运行时：点透明处的 mousedown 不进入拖拽
+  ALPHA = 0;
+  const beforeIgnore = W.__passthrough.clickIgnored || 0;
+  invokes.length = 0;
+  const onDown = (canvas.__h.mousedown || [])[0];
+  chk('canvas 上挂了 mousedown 处理器', typeof onDown === 'function');
+  await onDown({ button: 0, clientX: 31, clientY: 24, screenX: 0, screenY: 0 });
+  await sleep(30);
+  chk('点透明处不下发 drag_start（不会触发点击动画）', !lastInvoke('drag_start'));
+  chk('点透明处被计数（clickIgnored 增加）',
+      W.__passthrough.clickIgnored === beforeIgnore + 1);
+
+  // 27.4 点角色上仍然正常进入拖拽
+  ALPHA = 255;
+  invokes.length = 0;
+  await onDown({ button: 0, clientX: 150, clientY: 120, screenX: 0, screenY: 0 });
+  await sleep(30);
+  chk('点角色上照常进入拖拽（功能没被误伤）', !!lastInvoke('drag_start'));
+
+  // 复位拖拽标志，避免影响后续统计
+  for (const h of (document.__h.mouseup || [])) {
+    await h({});
+  }
+  await sleep(30);
 }
 
 /* ---------- 汇总 ---------- */

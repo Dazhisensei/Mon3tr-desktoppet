@@ -974,6 +974,58 @@ DOM 菜单在窗口内，**会跟着桌宠一起移动**——这是它的固有
 轮询间隔 60ms，开销很低（只在帧变化时才重绘采样画布）。
 默认开启，可在设置里关闭。
 
+### 坑：跨源素材污染画布 → 穿透永远不生效
+
+0.1.3 的打包版**穿透从头到尾没生效过**：点透明区域照样触发拖拽与点击动画。
+控制台没有任何报错，因为失败被 `catch` 吞掉了。
+
+根因链：
+
+1. 素材外置后走 `http://petasset.localhost/`（Rust 的 `petasset` 协议），
+   而页面本身是 `http://tauri.localhost` —— **host 不同，属于跨源**；
+2. `<img>` 没有声明 `crossOrigin`，`drawImage` 把画布标记为**被污染**；
+3. 采样画布上调用 `getImageData` 抛 `SecurityError`；
+4. `isOpaqueAt` 的 `catch` 里保守返回「不透明」→ 永远判定光标在角色上
+   → 从不调用 `set_click_through(true)`。
+
+**修法**：
+
+- 跨源加载时声明 `img.crossOrigin = 'anonymous'`。Rust 侧的
+  `http_response` 本来就带了 `Access-Control-Allow-Origin: *`，
+  声明之后浏览器才会走 CORS 校验、画布保持干净。
+  若声明后反而加载失败（服务端没给头），退回普通加载保底显示，
+  同时累加 `passStats.corsFallback` 并让采样失败可见。
+- 采样异常**不再静默**：记录 `passStats.probeTaint`、`console.error`
+  一次（60ms 轮询下只打一次），可通过 `window.__passthrough` 现场查看。
+
+### 兜底：轮询慢一拍时的点击
+
+穿透靠 60ms 轮询跟随光标。鼠标刚移进透明区、还没等到下一拍就按下时，
+这次点击仍会落进 canvas。因此在 `mousedown` / `contextmenu` 里用
+**同一套采样**再同步判一次：点到透明像素就当作点在桌面上，
+不进入拖拽、也不弹菜单（计入 `passStats.clickIgnored`）。
+
+这条兜底只在「用户开启了穿透」时生效；关掉穿透后透明区域仍属于窗口，
+行为与以前一致。
+
+## 窗口位置：物理像素 / 逻辑像素别混用
+
+`outer_position()` 返回**物理**像素，而建窗的
+`WebviewWindowBuilder::position(x, y)` 收的是**逻辑**像素。
+
+早期 `save_position` 直接把 `outer_position()` 存进配置，启动时又当逻辑值用。
+在 125% 缩放下每次重启都会把位置放大 1.25 倍：桌宠越跑越偏，最后整窗
+跑到屏幕外——用户看到的是「桌宠不见了，但进程还在」。
+
+现在统一约定：**配置里的 x/y 一律是逻辑像素**。
+
+- 保存（`save_position` 与 `Moved` 事件）时先除以 `scale_factor()`
+- 读取时直接 `position(x, y)`
+- 启动时 `clamp_into_work_area` 把越界坐标夹回当前显示器工作区，
+  兼容旧版本存下的物理坐标（否则老配置会落在屏幕外）
+
+`get_screen_info` / `move_window` 本来就用逻辑像素，三者现在一致。
+
 ## 音效素材目录
 
 ```

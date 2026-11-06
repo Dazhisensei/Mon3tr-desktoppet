@@ -231,10 +231,17 @@ fn exit_settings_ui(
     Ok(())
 }
 
+/// 取窗口位置（**逻辑**像素，与 `move_window` / `get_screen_info` 一致）。
+///
+/// `outer_position()` 是物理像素，跨 DPI 时与逻辑值不等，必须换算。
 #[tauri::command]
 fn get_window_pos(window: WebviewWindow) -> Result<(i32, i32), String> {
     let p = window.outer_position().map_err(|e| e.to_string())?;
-    Ok((p.x, p.y))
+    let sf = window.scale_factor().map_err(|e| e.to_string())?;
+    Ok((
+        (p.x as f64 / sf).round() as i32,
+        (p.y as f64 / sf).round() as i32,
+    ))
 }
 
 /// 开始拖拽 —— 交给**操作系统**处理。
@@ -1015,14 +1022,61 @@ fn show_context_menu() -> Result<(), String> {
 }
 
 /// 保存窗口位置。
+///
+/// ## 坐标必须换算成**逻辑**像素再存
+///
+/// `outer_position()` 给的是**物理**像素，而建窗时的
+/// `WebviewWindowBuilder::position(x, y)` 收的是**逻辑**像素。
+/// 直接存物理值、下次当逻辑值用，在 125%/150% 缩放下每次重启都会把
+/// 位置放大 1.25/1.5 倍 —— 表现为「重启后桌宠跑偏，最后跑到屏幕外」。
+///
+/// 项目其余部分（`get_screen_info` / `move_window`）统一用逻辑像素，
+/// 这里保持一致。
 #[tauri::command]
 fn save_position(window: WebviewWindow) -> Result<(), String> {
     let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let sf = window.scale_factor().map_err(|e| e.to_string())?;
     let mut cfg = load_config();
-    cfg.x = pos.x;
-    cfg.y = pos.y;
+    cfg.x = (pos.x as f64 / sf).round() as i32;
+    cfg.y = (pos.y as f64 / sf).round() as i32;
     save_config(&cfg);
     Ok(())
+}
+
+/// 把窗口夹回当前显示器的工作区（逻辑像素）。
+///
+/// 兜底两种情况：
+///   1. 旧版本的配置里存的是**物理**坐标（见 `save_position` 的说明），
+///      在当前缩放下换算回来会偏大，窗口可能整个跑到屏幕外
+///      —— 用户看到的就是「桌宠不见了，但进程还在」；
+///   2. 显示器分辨率 / 缩放改变后，原坐标失效。
+///
+/// 只在确实越界时才动窗口，避免正常启动被无谓地挪一下。
+fn clamp_into_work_area(window: &WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else { return };
+    let Ok(pos) = window.outer_position() else { return };
+    let Ok(size) = window.outer_size() else { return };
+
+    let sf = monitor.scale_factor();
+    let wa = monitor.work_area();
+
+    let win_w = size.width as f64 / sf;
+    let win_h = size.height as f64 / sf;
+    let work_x = wa.position.x as f64 / sf;
+    let work_y = wa.position.y as f64 / sf;
+    let work_w = wa.size.width as f64 / sf;
+    let work_h = wa.size.height as f64 / sf;
+
+    let cx = pos.x as f64 / sf;
+    let cy = pos.y as f64 / sf;
+    // 显示器比窗口还小时不能得到负数区间，用 max 兜住
+    let nx = cx.min(work_x + work_w - win_w).max(work_x);
+    let ny = cy.min(work_y + work_h - win_h).max(work_y);
+
+    if (nx - cx).abs() > 0.5 || (ny - cy).abs() > 0.5 {
+        let _ = window.set_position(tauri::LogicalPosition::new(nx, ny));
+        log(&format!("clamp position ({cx},{cy}) -> ({nx},{ny})"));
+    }
 }
 
 /// 设置缩放：同时调整窗口尺寸，保持素材宽高比。
@@ -1378,19 +1432,26 @@ pub fn run() {
                 Ok(win) => {
                     log("setup: window built OK");
 
-                    // 窗口移动/关闭时自动保存位置
+                    // 窗口移动/关闭时自动保存位置。
+                    // 注意存的是**逻辑**像素（见 save_position 的说明），
+                    // 否则重启后位置会按缩放倍数漂移。
                     let w2 = win.clone();
                     win.on_window_event(move |ev| match ev {
                         tauri::WindowEvent::Moved(_) | tauri::WindowEvent::CloseRequested { .. } => {
                             if let Ok(pos) = w2.outer_position() {
+                                let sf = w2.scale_factor().unwrap_or(1.0);
                                 let mut cfg = load_config();
-                                cfg.x = pos.x;
-                                cfg.y = pos.y;
+                                cfg.x = (pos.x as f64 / sf).round() as i32;
+                                cfg.y = (pos.y as f64 / sf).round() as i32;
                                 save_config(&cfg);
                             }
                         }
                         _ => {}
                     });
+
+                    // 旧配置里的物理坐标可能已经超出工作区，先夹回来再显示，
+                    // 避免用户看到窗口在屏幕外「消失」。
+                    clamp_into_work_area(&win);
 
                     let _ = win.show();
                     log("setup: shown");
